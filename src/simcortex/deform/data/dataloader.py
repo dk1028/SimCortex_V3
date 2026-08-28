@@ -125,6 +125,26 @@ def surf_path(root: str, subj: str, session_label: str, space: str, surf_name: s
     )
 
 
+_FIXED_TEMPLATE_FILENAMES = {
+    "lh_pial": "lh_pial_smoothed.ply",
+    "lh_white": "lh_white_smoothed.ply",
+    "rh_pial": "rh_pial_smoothed.ply",
+    "rh_white": "rh_white_smoothed.ply",
+}
+
+
+def fixed_surf_path(fixed_template_root: str, surf_name: str) -> str:
+    if surf_name not in _FIXED_TEMPLATE_FILENAMES:
+        raise KeyError(
+            f"Unknown fixed template surface name: {surf_name}. "
+            f"Allowed: {sorted(_FIXED_TEMPLATE_FILENAMES)}"
+        )
+    return os.path.join(
+        str(fixed_template_root),
+        _FIXED_TEMPLATE_FILENAMES[surf_name],
+    )
+
+
 # ----------------------------
 # IO helpers
 # ----------------------------
@@ -207,7 +227,7 @@ class CSRDeformDataset(Dataset):
     def __init__(
         self,
         preproc_root: str,
-        initsurf_root: str,
+        initsurf_root: str | None,
         subjects: List[str],
         session_label: str,
         space: str,
@@ -218,9 +238,16 @@ class CSRDeformDataset(Dataset):
         prob_gamma: float = 1.0,
         aug: bool = False,  # backward-compatible no-op; augmentation is handled in train.py
         strict_missing: bool = True,
+        use_probability_map: bool = True,
+        use_fixed_initial_surface: bool = False,
+        fixed_template_root: str | None = None,
     ):
         self.preproc_root = str(preproc_root)
-        self.initsurf_root = str(initsurf_root)
+        self.initsurf_root = (
+            None
+            if initsurf_root in (None, "")
+            else str(initsurf_root)
+        )
         self.subjects = _normalize_subjects(subjects)
         self.session_label = str(session_label).strip()
         self.space = str(space).strip()
@@ -239,33 +266,106 @@ class CSRDeformDataset(Dataset):
             prob_clip_max,
             prob_gamma,
         )
+
         self.strict_missing = bool(strict_missing)
+        self.use_probability_map = bool(use_probability_map)
+        self.use_fixed_initial_surface = bool(use_fixed_initial_surface)
+        self.fixed_template_root = (
+            None
+            if fixed_template_root in (None, "")
+            else str(fixed_template_root)
+        )
+
+        if self.use_fixed_initial_surface and self.fixed_template_root is None:
+            raise ValueError(
+                "use_fixed_initial_surface=True requires fixed_template_root."
+            )
+
+        needs_subject_initsurf = (
+            self.use_probability_map
+            or not self.use_fixed_initial_surface
+        )
+        if needs_subject_initsurf and self.initsurf_root is None:
+            raise ValueError(
+                "initsurf_root is required when using a subject-specific "
+                "probability map or subject-specific initial surfaces."
+            )
 
         self.samples = []
         missing_by_subject = []
 
         for subj in self.subjects:
-            mri_path = mni_t1_path(self.preproc_root, subj, self.session_label, self.space)
-            prob_path = ribbon_prob_path(self.initsurf_root, subj, self.session_label, self.space)
+            mri_path = mni_t1_path(
+                self.preproc_root,
+                subj,
+                self.session_label,
+                self.space,
+            )
 
-            gt_paths = {s: surf_path(self.preproc_root, subj, self.session_label, self.space, s) for s in self.surface_names}
-            ini_paths = {s: surf_path(self.initsurf_root, subj, self.session_label, self.space, s) for s in self.surface_names}
+            prob_path = None
+            if self.use_probability_map:
+                prob_path = ribbon_prob_path(
+                    self.initsurf_root,
+                    subj,
+                    self.session_label,
+                    self.space,
+                )
+
+            gt_paths = {
+                s: surf_path(
+                    self.preproc_root,
+                    subj,
+                    self.session_label,
+                    self.space,
+                    s,
+                )
+                for s in self.surface_names
+            }
+
+            if self.use_fixed_initial_surface:
+                ini_paths = {
+                    s: fixed_surf_path(self.fixed_template_root, s)
+                    for s in self.surface_names
+                }
+            else:
+                ini_paths = {
+                    s: surf_path(
+                        self.initsurf_root,
+                        subj,
+                        self.session_label,
+                        self.space,
+                        s,
+                    )
+                    for s in self.surface_names
+                }
 
             missing = []
-            if not os.path.isfile(mri_path): missing.append(mri_path)
-            if not os.path.isfile(prob_path): missing.append(prob_path)
+
+            if not os.path.isfile(mri_path):
+                missing.append(mri_path)
+
+            if prob_path is not None and not os.path.isfile(prob_path):
+                missing.append(prob_path)
+
             for s in self.surface_names:
-                if not os.path.isfile(gt_paths[s]):  missing.append(gt_paths[s])
-                if not os.path.isfile(ini_paths[s]): missing.append(ini_paths[s])
+                if not os.path.isfile(gt_paths[s]):
+                    missing.append(gt_paths[s])
+                if not os.path.isfile(ini_paths[s]):
+                    missing.append(ini_paths[s])
 
             if missing:
                 missing_by_subject.append((subj, missing))
                 continue
 
-            self.samples.append((subj, mri_path, prob_path, gt_paths, ini_paths))
+            self.samples.append(
+                (subj, mri_path, prob_path, gt_paths, ini_paths)
+            )
 
         if missing_by_subject:
-            message = _format_missing_inputs("CSRDeformDataset", missing_by_subject)
+            message = _format_missing_inputs(
+                "CSRDeformDataset",
+                missing_by_subject,
+            )
             if self.strict_missing:
                 raise FileNotFoundError(message)
             logger.warning("%s", message)
@@ -273,7 +373,8 @@ class CSRDeformDataset(Dataset):
         if len(self.samples) == 0:
             raise RuntimeError(
                 "CSRDeformDataset found zero valid subjects. "
-                "Check preproc_root, initsurf_root, subject IDs, session_label, space, "
+                "Check preproc_root, subject IDs, session_label, space, "
+                "fixed-template settings, initsurf_root when required, "
                 "and surface file names."
             )
 
@@ -282,81 +383,157 @@ class CSRDeformDataset(Dataset):
 
     def __getitem__(self, idx: int):
         subj, mri_path, prob_path, gt_paths, ini_paths = self.samples[idx]
+
         mri, affine = read_nii(mri_path)
-        prob, prob_affine = read_nii(prob_path)
+        prob = None
 
-        if not np.allclose(prob_affine, affine, atol=1e-4, rtol=0.0):
-            raise ValueError(
-                f"PROB/MRI affine mismatch for {subj}: "
-                f"prob_affine={prob_affine}, mri_affine={affine}"
-            )
+        if self.use_probability_map:
+            prob, prob_affine = read_nii(prob_path)
 
-        if prob.shape != mri.shape:
-            raise ValueError(f"PROB/MRI shape mismatch for {subj}: {prob.shape} vs {mri.shape}")
+            if not np.allclose(prob_affine, affine, atol=1e-4, rtol=0.0):
+                raise ValueError(
+                    f"PROB/MRI affine mismatch for {subj}: "
+                    f"prob_affine={prob_affine}, mri_affine={affine}"
+                )
+
+            if prob.shape != mri.shape:
+                raise ValueError(
+                    f"PROB/MRI shape mismatch for {subj}: "
+                    f"prob={prob.shape}, mri={mri.shape}"
+                )
 
         mri = normalize_mri_mean_std(mri)
 
-        prob = np.nan_to_num(prob, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
-        if self.prob_clip_min > 0:
-            prob[prob < self.prob_clip_min] = 0.0
-        prob = np.clip(prob, 0.0, self.prob_clip_max).astype(np.float32)
-        if abs(self.prob_gamma - 1.0) > 1e-6:
-            prob = np.power(prob, self.prob_gamma).astype(np.float32)
+        if self.use_probability_map:
+            prob = np.nan_to_num(
+                prob,
+                nan=0.0,
+                posinf=1.0,
+                neginf=0.0,
+            ).astype(np.float32)
+
+            if self.prob_clip_min > 0:
+                prob[prob < self.prob_clip_min] = 0.0
+
+            prob = np.clip(
+                prob,
+                0.0,
+                self.prob_clip_max,
+            ).astype(np.float32)
+
+            if abs(self.prob_gamma - 1.0) > 1e-6:
+                prob = np.power(
+                    prob,
+                    self.prob_gamma,
+                ).astype(np.float32)
 
         D0, H0, W0 = mri.shape
         D1, H1, W1 = self.inshape
 
-        crop_slices, pad_before, pad_after, crop_before = make_center_crop_pad_slices(
-            (D0, H0, W0), (D1, H1, W1)
+        crop_slices, pad_before, pad_after, crop_before = (
+            make_center_crop_pad_slices(
+                (D0, H0, W0),
+                (D1, H1, W1),
+            )
         )
 
-        mri_c = mri[crop_slices[0], crop_slices[1], crop_slices[2]]
-        prob_c = prob[crop_slices[0], crop_slices[1], crop_slices[2]]
+        mri_c = mri[
+            crop_slices[0],
+            crop_slices[1],
+            crop_slices[2],
+        ]
+
+        prob_c = (
+            prob[
+                crop_slices[0],
+                crop_slices[1],
+                crop_slices[2],
+            ]
+            if self.use_probability_map
+            else None
+        )
 
         pbD, pbH, pbW = pad_before
         paD, paH, paW = pad_after
 
         mri_t = torch.from_numpy(mri_c)[None, None]
-        prob_t = torch.from_numpy(prob_c)[None, None]
+        prob_t = (
+            torch.from_numpy(prob_c)[None, None]
+            if self.use_probability_map
+            else None
+        )
 
-        mri_t = F.pad(mri_t, (pbW, paW, pbH, paH, pbD, paD), mode="replicate")
-        prob_t = F.pad(prob_t, (pbW, paW, pbH, paH, pbD, paD), mode="constant", value=0.0)
+        mri_t = F.pad(
+            mri_t,
+            (pbW, paW, pbH, paH, pbD, paD),
+            mode="replicate",
+        )
+
+        if self.use_probability_map:
+            prob_t = F.pad(
+                prob_t,
+                (pbW, paW, pbH, paH, pbD, paD),
+                mode="constant",
+                value=0.0,
+            )
 
         mri_out = mri_t[0, 0].numpy()
-        prob_out = prob_t[0, 0].numpy()
+        prob_out = (
+            prob_t[0, 0].numpy()
+            if self.use_probability_map
+            else None
+        )
+
         if mri_out.shape != self.inshape:
             raise ValueError(
                 f"Internal crop/pad error for subject '{subj}': "
                 f"got {mri_out.shape}, expected {self.inshape}"
             )
 
-        shift_ijk = np.array(pad_before, dtype=np.float32) - np.array(crop_before, dtype=np.float32)
+        shift_ijk = (
+            np.array(pad_before, dtype=np.float32)
+            - np.array(crop_before, dtype=np.float32)
+        )
 
         A = torch.from_numpy(affine).float()
-        init_verts_vox, init_faces = {}, {}
-        gt_verts_vox, gt_faces = {}, {}
+
+        init_verts_vox = {}
+        init_faces = {}
+        gt_verts_vox = {}
+        gt_faces = {}
 
         for s in self.surface_names:
             v_ini_mm, f_ini = read_mesh(ini_paths[s])
-            v_gt_mm,  f_gt  = read_mesh(gt_paths[s])
+            v_gt_mm, f_gt = read_mesh(gt_paths[s])
 
-            v_ini = world_to_voxel(torch.from_numpy(v_ini_mm).float(), A).numpy()
-            v_gt  = world_to_voxel(torch.from_numpy(v_gt_mm).float(),  A).numpy()
+            v_ini = world_to_voxel(
+                torch.from_numpy(v_ini_mm).float(),
+                A,
+            ).numpy()
+
+            v_gt = world_to_voxel(
+                torch.from_numpy(v_gt_mm).float(),
+                A,
+            ).numpy()
 
             v_ini = (v_ini + shift_ijk).astype(np.float32)
-            v_gt  = (v_gt  + shift_ijk).astype(np.float32)
+            v_gt = (v_gt + shift_ijk).astype(np.float32)
 
             init_verts_vox[s] = torch.from_numpy(v_ini).float()
             init_faces[s] = torch.from_numpy(f_ini).long()
             gt_verts_vox[s] = torch.from_numpy(v_gt).float()
             gt_faces[s] = torch.from_numpy(f_gt).long()
 
-        chans = [
-            torch.from_numpy(mri_out).float(),
-            torch.from_numpy(prob_out).float(),
+        channels = [
+            torch.from_numpy(mri_out).float()
         ]
 
-        vol = torch.stack(chans, dim=0)  # (C,D,H,W)
+        if self.use_probability_map:
+            channels.append(
+                torch.from_numpy(prob_out).float()
+            )
+
+        vol = torch.stack(channels, dim=0)
 
         return {
             "subject": subj,
@@ -378,14 +555,14 @@ class CSRDeformInferDataset(Dataset):
 
     Required inputs per subject:
       - MNI-space preprocessed T1w image from sc-preproc
-      - ribbon probability map from sc-initsurf
-      - initial surfaces from sc-initsurf
+      - optional ribbon probability map from sc-initsurf
+      - subject-specific or shared fixed initial surfaces
     """
 
     def __init__(
         self,
         preproc_root: str,
-        initsurf_root: str,
+        initsurf_root: str | None,
         subjects: List[str],
         session_label: str,
         space: str,
@@ -395,9 +572,16 @@ class CSRDeformInferDataset(Dataset):
         prob_clip_max: float = 1.0,
         prob_gamma: float = 1.0,
         strict_missing: bool = True,
+        use_probability_map: bool = True,
+        use_fixed_initial_surface: bool = False,
+        fixed_template_root: str | None = None,
     ):
         self.preproc_root = str(preproc_root)
-        self.initsurf_root = str(initsurf_root)
+        self.initsurf_root = (
+            None
+            if initsurf_root in (None, "")
+            else str(initsurf_root)
+        )
         self.subjects = _normalize_subjects(subjects)
         self.session_label = str(session_label).strip()
         self.space = str(space).strip()
@@ -416,24 +600,76 @@ class CSRDeformInferDataset(Dataset):
             prob_clip_max,
             prob_gamma,
         )
+
         self.strict_missing = bool(strict_missing)
+        self.use_probability_map = bool(use_probability_map)
+        self.use_fixed_initial_surface = bool(use_fixed_initial_surface)
+        self.fixed_template_root = (
+            None
+            if fixed_template_root in (None, "")
+            else str(fixed_template_root)
+        )
+
+        if self.use_fixed_initial_surface and self.fixed_template_root is None:
+            raise ValueError(
+                "use_fixed_initial_surface=True requires fixed_template_root."
+            )
+
+        needs_subject_initsurf = (
+            self.use_probability_map
+            or not self.use_fixed_initial_surface
+        )
+        if needs_subject_initsurf and self.initsurf_root is None:
+            raise ValueError(
+                "initsurf_root is required when using a subject-specific "
+                "probability map or subject-specific initial surfaces."
+            )
 
         self.samples = []
         missing_by_subject = []
 
         for subj in self.subjects:
-            mri_path = mni_t1_path(self.preproc_root, subj, self.session_label, self.space)
-            prob_path = ribbon_prob_path(self.initsurf_root, subj, self.session_label, self.space)
-            ini_paths = {
-                s: surf_path(self.initsurf_root, subj, self.session_label, self.space, s)
-                for s in self.surface_names
-            }
+            mri_path = mni_t1_path(
+                self.preproc_root,
+                subj,
+                self.session_label,
+                self.space,
+            )
+
+            prob_path = None
+            if self.use_probability_map:
+                prob_path = ribbon_prob_path(
+                    self.initsurf_root,
+                    subj,
+                    self.session_label,
+                    self.space,
+                )
+
+            if self.use_fixed_initial_surface:
+                ini_paths = {
+                    s: fixed_surf_path(self.fixed_template_root, s)
+                    for s in self.surface_names
+                }
+            else:
+                ini_paths = {
+                    s: surf_path(
+                        self.initsurf_root,
+                        subj,
+                        self.session_label,
+                        self.space,
+                        s,
+                    )
+                    for s in self.surface_names
+                }
 
             missing = []
+
             if not os.path.isfile(mri_path):
                 missing.append(mri_path)
-            if not os.path.isfile(prob_path):
+
+            if prob_path is not None and not os.path.isfile(prob_path):
                 missing.append(prob_path)
+
             for s in self.surface_names:
                 if not os.path.isfile(ini_paths[s]):
                     missing.append(ini_paths[s])
@@ -442,10 +678,15 @@ class CSRDeformInferDataset(Dataset):
                 missing_by_subject.append((subj, missing))
                 continue
 
-            self.samples.append((subj, mri_path, prob_path, ini_paths))
+            self.samples.append(
+                (subj, mri_path, prob_path, ini_paths)
+            )
 
         if missing_by_subject:
-            message = _format_missing_inputs("CSRDeformInferDataset", missing_by_subject)
+            message = _format_missing_inputs(
+                "CSRDeformInferDataset",
+                missing_by_subject,
+            )
             if self.strict_missing:
                 raise FileNotFoundError(message)
             logger.warning("%s", message)
@@ -453,7 +694,8 @@ class CSRDeformInferDataset(Dataset):
         if len(self.samples) == 0:
             raise RuntimeError(
                 "CSRDeformInferDataset found zero valid subjects. "
-                "Check preproc_root, initsurf_root, subject IDs, session_label, and space."
+                "Check preproc_root, subject IDs, session_label, space, "
+                "fixed-template settings, and initsurf_root when required."
             )
 
     def __len__(self):
@@ -463,58 +705,115 @@ class CSRDeformInferDataset(Dataset):
         subj, mri_path, prob_path, ini_paths = self.samples[idx]
 
         mri, affine = read_nii(mri_path)
-        prob, prob_affine = read_nii(prob_path)
+        prob = None
 
-        if not np.allclose(prob_affine, affine, atol=1e-4, rtol=0.0):
-            raise ValueError(
-                f"Prob/MRI affine mismatch for subject '{subj}'.\n"
-                f"  Prob affine:\n{prob_affine}\n"
-                f"  MRI affine:\n{affine}"
-            )
+        if self.use_probability_map:
+            prob, prob_affine = read_nii(prob_path)
 
-        if prob.shape != mri.shape:
-            raise ValueError(
-                f"PROB/MRI shape mismatch for {subj}: prob={prob.shape}, mri={mri.shape}"
-            )
+            if not np.allclose(prob_affine, affine, atol=1e-4, rtol=0.0):
+                raise ValueError(
+                    f"PROB/MRI affine mismatch for {subj}: "
+                    f"prob_affine={prob_affine}, mri_affine={affine}"
+                )
+
+            if prob.shape != mri.shape:
+                raise ValueError(
+                    f"PROB/MRI shape mismatch for {subj}: "
+                    f"prob={prob.shape}, mri={mri.shape}"
+                )
 
         mri = normalize_mri_mean_std(mri)
 
-        prob = np.nan_to_num(prob, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
-        if self.prob_clip_min > 0:
-            prob[prob < self.prob_clip_min] = 0.0
-        prob = np.clip(prob, 0.0, self.prob_clip_max).astype(np.float32)
+        if self.use_probability_map:
+            prob = np.nan_to_num(
+                prob,
+                nan=0.0,
+                posinf=1.0,
+                neginf=0.0,
+            ).astype(np.float32)
 
-        if abs(self.prob_gamma - 1.0) > 1e-6:
-            prob = np.power(prob, self.prob_gamma).astype(np.float32)
+            if self.prob_clip_min > 0:
+                prob[prob < self.prob_clip_min] = 0.0
+
+            prob = np.clip(
+                prob,
+                0.0,
+                self.prob_clip_max,
+            ).astype(np.float32)
+
+            if abs(self.prob_gamma - 1.0) > 1e-6:
+                prob = np.power(
+                    prob,
+                    self.prob_gamma,
+                ).astype(np.float32)
 
         D0, H0, W0 = mri.shape
         D1, H1, W1 = self.inshape
 
-        crop_slices, pad_before, pad_after, crop_before = make_center_crop_pad_slices(
-            (D0, H0, W0), (D1, H1, W1)
+        crop_slices, pad_before, pad_after, crop_before = (
+            make_center_crop_pad_slices(
+                (D0, H0, W0),
+                (D1, H1, W1),
+            )
         )
 
-        mri_c = mri[crop_slices[0], crop_slices[1], crop_slices[2]]
-        prob_c = prob[crop_slices[0], crop_slices[1], crop_slices[2]]
+        mri_c = mri[
+            crop_slices[0],
+            crop_slices[1],
+            crop_slices[2],
+        ]
+
+        prob_c = (
+            prob[
+                crop_slices[0],
+                crop_slices[1],
+                crop_slices[2],
+            ]
+            if self.use_probability_map
+            else None
+        )
 
         pbD, pbH, pbW = pad_before
         paD, paH, paW = pad_after
 
         mri_t = torch.from_numpy(mri_c)[None, None]
-        prob_t = torch.from_numpy(prob_c)[None, None]
+        prob_t = (
+            torch.from_numpy(prob_c)[None, None]
+            if self.use_probability_map
+            else None
+        )
 
-        mri_t = F.pad(mri_t, (pbW, paW, pbH, paH, pbD, paD), mode="replicate")
-        prob_t = F.pad(prob_t, (pbW, paW, pbH, paH, pbD, paD), mode="constant", value=0.0)
+        mri_t = F.pad(
+            mri_t,
+            (pbW, paW, pbH, paH, pbD, paD),
+            mode="replicate",
+        )
+
+        if self.use_probability_map:
+            prob_t = F.pad(
+                prob_t,
+                (pbW, paW, pbH, paH, pbD, paD),
+                mode="constant",
+                value=0.0,
+            )
 
         mri_out = mri_t[0, 0].numpy()
-        prob_out = prob_t[0, 0].numpy()
+        prob_out = (
+            prob_t[0, 0].numpy()
+            if self.use_probability_map
+            else None
+        )
 
         if mri_out.shape != self.inshape:
             raise ValueError(
-                f"Internal crop/pad error for {subj}: got {mri_out.shape}, expected {self.inshape}"
+                f"Internal crop/pad error for subject '{subj}': "
+                f"got {mri_out.shape}, expected {self.inshape}"
             )
 
-        shift_ijk = np.array(pad_before, dtype=np.float32) - np.array(crop_before, dtype=np.float32)
+        shift_ijk = (
+            np.array(pad_before, dtype=np.float32)
+            - np.array(crop_before, dtype=np.float32)
+        )
 
         A = torch.from_numpy(affine).float()
 
@@ -524,17 +823,26 @@ class CSRDeformInferDataset(Dataset):
         for s in self.surface_names:
             v_ini_mm, f_ini = read_mesh(ini_paths[s])
 
-            v_ini = world_to_voxel(torch.from_numpy(v_ini_mm).float(), A).numpy()
+            v_ini = world_to_voxel(
+                torch.from_numpy(v_ini_mm).float(),
+                A,
+            ).numpy()
+
             v_ini = (v_ini + shift_ijk).astype(np.float32)
 
             init_verts_vox[s] = torch.from_numpy(v_ini).float()
             init_faces[s] = torch.from_numpy(f_ini).long()
 
-        chans = [
-            torch.from_numpy(mri_out).float(),
-            torch.from_numpy(prob_out).float(),
+        channels = [
+            torch.from_numpy(mri_out).float()
         ]
-        vol = torch.stack(chans, dim=0)
+
+        if self.use_probability_map:
+            channels.append(
+                torch.from_numpy(prob_out).float()
+            )
+
+        vol = torch.stack(channels, dim=0)
 
         return {
             "subject": subj,
