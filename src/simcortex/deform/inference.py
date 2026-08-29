@@ -85,72 +85,206 @@ def _validate_multi_split_df(df: pd.DataFrame) -> None:
         raise ValueError(f"Multi-dataset split_file must contain columns {sorted(req)}. Got: {list(df.columns)}")
 
 
+def _requires_subject_initsurf(cfg) -> bool:
+    """
+    Return whether the selected inference mode needs
+    subject-specific initialization resources.
+
+    Subject-specific resources are required when either:
+      1. the ribbon probability map is used, or
+      2. initial surfaces are subject-specific.
+
+    MRI-only fixed-template inference needs neither.
+    """
+    use_probability_map = bool(
+        OmegaConf.select(
+            cfg,
+            "dataset.use_probability_map",
+            default=True,
+        )
+    )
+    use_fixed_initial_surface = bool(
+        OmegaConf.select(
+            cfg,
+            "dataset.use_fixed_initial_surface",
+            default=False,
+        )
+    )
+
+    return (
+        use_probability_map
+        or not use_fixed_initial_surface
+    )
+
+
 def _detect_deform_infer_mode(cfg):
-    single_preproc_root = OmegaConf.select(cfg, "dataset.path", default=None)
-    single_initsurf_root = OmegaConf.select(cfg, "dataset.initsurf_root", default=None)
-    single_out_root = OmegaConf.select(cfg, "outputs.out_root", default=None)
+    single_preproc_root = OmegaConf.select(
+        cfg,
+        "dataset.path",
+        default=None,
+    )
+    single_initsurf_root = OmegaConf.select(
+        cfg,
+        "dataset.initsurf_root",
+        default=None,
+    )
+    single_out_root = OmegaConf.select(
+        cfg,
+        "outputs.out_root",
+        default=None,
+    )
 
-    single_preproc_root = None if single_preproc_root in (None, "") else str(single_preproc_root)
-    single_initsurf_root = None if single_initsurf_root in (None, "") else str(single_initsurf_root)
-    single_out_root = None if single_out_root in (None, "") else str(single_out_root)
+    single_preproc_root = (
+        None
+        if single_preproc_root in (None, "")
+        else str(single_preproc_root)
+    )
+    single_initsurf_root = (
+        None
+        if single_initsurf_root in (None, "")
+        else str(single_initsurf_root)
+    )
+    single_out_root = (
+        None
+        if single_out_root in (None, "")
+        else str(single_out_root)
+    )
 
-    roots_map = _get_map(cfg.dataset, ("roots",))
-    initsurf_roots_map = _get_map(cfg.dataset, ("initsurf_roots",))
-    out_roots_map = _get_map(cfg.outputs, ("out_roots",))
+    roots_map = _get_map(
+        cfg.dataset,
+        ("roots",),
+    )
+    initsurf_roots_map = _get_map(
+        cfg.dataset,
+        ("initsurf_roots",),
+    )
+    out_roots_map = _get_map(
+        cfg.outputs,
+        ("out_roots",),
+    )
+
+    needs_subject_initsurf = _requires_subject_initsurf(cfg)
 
     if single_preproc_root is not None:
         log.info("Deform inference mode: SINGLE-DATASET")
-        log.info(f"dataset.path = {single_preproc_root}")
-        log.info(f"dataset.initsurf_root = {single_initsurf_root}")
-        log.info(f"outputs.out_root = {single_out_root}")
+        log.info("dataset.path = %s", single_preproc_root)
+        log.info(
+            "subject-specific initsurf required = %s",
+            needs_subject_initsurf,
+        )
+        log.info("outputs.out_root = %s", single_out_root)
 
-        if single_initsurf_root is None:
-            raise ValueError("Single-dataset deform inference requires dataset.initsurf_root")
+        if (
+            needs_subject_initsurf
+            and single_initsurf_root is None
+        ):
+            raise ValueError(
+                "Single-dataset deform inference requires "
+                "dataset.initsurf_root for the selected input mode."
+            )
+
         if single_out_root is None:
-            raise ValueError("Single-dataset deform inference requires outputs.out_root")
+            raise ValueError(
+                "Single-dataset deform inference requires "
+                "outputs.out_root"
+            )
 
         if roots_map is not None:
             log.warning(
                 "Both dataset.path and dataset.roots are present. "
                 "Using SINGLE-DATASET mode and ignoring dataset.roots."
             )
+
         if initsurf_roots_map is not None:
             log.warning(
-                "Both dataset.initsurf_root and dataset.initsurf_roots are present. "
-                "Using SINGLE-DATASET mode and ignoring dataset.initsurf_roots."
+                "Both dataset.initsurf_root and "
+                "dataset.initsurf_roots are present. "
+                "Using SINGLE-DATASET mode and ignoring "
+                "dataset.initsurf_roots."
             )
+
         if out_roots_map is not None:
             log.warning(
                 "Both outputs.out_root and outputs.out_roots are present. "
                 "Using SINGLE-DATASET mode and ignoring outputs.out_roots."
             )
 
-        return "single", single_preproc_root, single_initsurf_root, single_out_root, None, None, None
+        return (
+            "single",
+            single_preproc_root,
+            single_initsurf_root,
+            single_out_root,
+            None,
+            None,
+            None,
+        )
 
     if roots_map is not None:
         log.info("Deform inference mode: MULTI-DATASET")
-        log.info(f"dataset.roots keys = {list(roots_map.keys())}")
+        log.info(
+            "dataset.roots keys = %s",
+            list(roots_map.keys()),
+        )
+        log.info(
+            "subject-specific initsurf required = %s",
+            needs_subject_initsurf,
+        )
 
-        if initsurf_roots_map is None:
-            raise ValueError("Multi-dataset deform inference requires dataset.initsurf_roots")
+        if (
+            needs_subject_initsurf
+            and initsurf_roots_map is None
+        ):
+            raise ValueError(
+                "Multi-dataset deform inference requires "
+                "dataset.initsurf_roots for the selected input mode."
+            )
+
         if out_roots_map is None:
-            raise ValueError("Multi-dataset deform inference requires outputs.out_roots")
+            raise ValueError(
+                "Multi-dataset deform inference requires "
+                "outputs.out_roots"
+            )
 
-        missing_init = sorted(set(roots_map.keys()) - set(initsurf_roots_map.keys()))
-        if missing_init:
-            raise KeyError(f"dataset.initsurf_roots missing keys required by dataset.roots: {missing_init}")
+        if initsurf_roots_map is not None:
+            missing_init = sorted(
+                set(roots_map.keys())
+                - set(initsurf_roots_map.keys())
+            )
 
-        missing_out = sorted(set(roots_map.keys()) - set(out_roots_map.keys()))
+            if needs_subject_initsurf and missing_init:
+                raise KeyError(
+                    "dataset.initsurf_roots missing keys required "
+                    f"by dataset.roots: {missing_init}"
+                )
+
+        missing_out = sorted(
+            set(roots_map.keys())
+            - set(out_roots_map.keys())
+        )
+
         if missing_out:
-            raise KeyError(f"outputs.out_roots missing keys required by dataset.roots: {missing_out}")
+            raise KeyError(
+                "outputs.out_roots missing keys required "
+                f"by dataset.roots: {missing_out}"
+            )
 
-        return "multi", None, None, None, roots_map, initsurf_roots_map, out_roots_map
+        return (
+            "multi",
+            None,
+            None,
+            None,
+            roots_map,
+            initsurf_roots_map,
+            out_roots_map,
+        )
 
     raise ValueError(
         "Could not determine deform inference mode. Provide either:\n"
-        "  - dataset.path + dataset.initsurf_root + outputs.out_root   (single-dataset)\n"
+        "  - dataset.path + outputs.out_root for single-dataset mode,\n"
         "or\n"
-        "  - dataset.roots + dataset.initsurf_roots + outputs.out_roots (multi-dataset)"
+        "  - dataset.roots + outputs.out_roots for multi-dataset mode.\n"
+        "An initsurf root is required only when the selected "
+        "input mode uses subject-specific initialization resources."
     )
 
 def load_checkpoint(model: torch.nn.Module, ckpt_path: str, strict: bool = True):
@@ -245,6 +379,54 @@ def main(cfg: DictConfig):
     session_label = str(getattr(cfg.dataset, "session_label", "01"))
     space = str(getattr(cfg.dataset, "space", "MNI152"))
 
+    use_probability_map = bool(
+        OmegaConf.select(
+            cfg,
+            "dataset.use_probability_map",
+            default=True,
+        )
+    )
+    use_fixed_initial_surface = bool(
+        OmegaConf.select(
+            cfg,
+            "dataset.use_fixed_initial_surface",
+            default=False,
+        )
+    )
+    fixed_template_root = OmegaConf.select(
+        cfg,
+        "dataset.fixed_template_root",
+        default=None,
+    )
+    fixed_template_root = (
+        None
+        if fixed_template_root in (None, "")
+        else str(fixed_template_root)
+    )
+
+    if use_probability_map:
+        raise ValueError(
+            "MRI-only inference requires "
+            "dataset.use_probability_map=false."
+        )
+
+    if int(cfg.model.c_in) != 1:
+        raise ValueError(
+            "MRI-only inference requires model.c_in=1, "
+            f"but got {cfg.model.c_in}."
+        )
+
+    if (
+        use_fixed_initial_surface
+        and fixed_template_root is None
+    ):
+        raise ValueError(
+            "dataset.use_fixed_initial_surface=true requires "
+            "dataset.fixed_template_root."
+        )
+
+    needs_subject_initsurf = _requires_subject_initsurf(cfg)
+
     mode, single_preproc_root, single_initsurf_root, single_out_root, roots_map, initsurf_roots_map, out_roots_map = _detect_deform_infer_mode(cfg)
 
     df = pd.read_csv(split_file)
@@ -266,10 +448,8 @@ def main(cfg: DictConfig):
         C_in=int(cfg.model.c_in),
         inshape=list(cfg.model.inshape),
         sigma=float(cfg.model.sigma),
-        geom_ratio=float(getattr(cfg.model, "geom_ratio", 0.5)),
-        geom_depth=int(getattr(cfg.model, "geom_depth", 6)),
         gn_groups=int(getattr(cfg.model, "gn_groups", 8)),
-        gate_init=float(getattr(cfg.model, "gate_init", -3.0)),
+        dropout=float(getattr(cfg.model, "dropout", 0.0)),
     ).to(device)
 
     load_checkpoint(model, str(cfg.model.ckpt_path), strict=bool(getattr(cfg.model, "strict_load", True)))
@@ -291,7 +471,7 @@ def main(cfg: DictConfig):
 
         ds = CSRDeformInferDataset(
             preproc_root=str(single_preproc_root),
-            initsurf_root=str(single_initsurf_root),
+            initsurf_root=single_initsurf_root,
             subjects=subjects,
             session_label=session_label,
             space=space,
@@ -300,6 +480,9 @@ def main(cfg: DictConfig):
             prob_clip_min=float(cfg.dataset.prob_clip_min),
             prob_clip_max=float(cfg.dataset.prob_clip_max),
             prob_gamma=float(cfg.dataset.prob_gamma),
+            use_probability_map=use_probability_map,
+            use_fixed_initial_surface=use_fixed_initial_surface,
+            fixed_template_root=fixed_template_root,
         )
 
         loader = DataLoader(
@@ -316,6 +499,11 @@ def main(cfg: DictConfig):
         with torch.inference_mode ():
             for batch in tqdm(loader, desc="Infer SINGLE", leave=False):
                 vol = batch["vol"].to(device)
+                if vol.ndim != 5 or int(vol.shape[1]) != 1:
+                    raise ValueError(
+                        "Expected MRI-only inference volume shape "
+                        f"(B,1,D,H,W), got {tuple(vol.shape)}"
+                    )
                 B = vol.shape[0]
 
                 padded_init, lengths, per_counts, faces_per_subj, affines, shifts = build_unified_init(
@@ -361,11 +549,35 @@ def main(cfg: DictConfig):
         df["dataset"] = df["dataset"].astype(str).str.strip()
 
         for ds_key, ds_df in df.groupby("dataset"):
-            if ds_key not in roots_map or ds_key not in initsurf_roots_map or ds_key not in out_roots_map:
-                raise KeyError(f"Missing dataset key in config: {ds_key}")
+            if ds_key not in roots_map:
+                raise KeyError(
+                    f"dataset.roots is missing key: {ds_key}"
+                )
+
+            if ds_key not in out_roots_map:
+                raise KeyError(
+                    f"outputs.out_roots is missing key: {ds_key}"
+                )
 
             preproc_root = str(roots_map[ds_key])
-            initsurf_root = str(initsurf_roots_map[ds_key])
+
+            if initsurf_roots_map is None:
+                initsurf_root = None
+            else:
+                initsurf_root = initsurf_roots_map.get(
+                    ds_key,
+                    None,
+                )
+
+            if (
+                needs_subject_initsurf
+                and initsurf_root is None
+            ):
+                raise KeyError(
+                    "dataset.initsurf_roots is missing key "
+                    f"required by the selected input mode: {ds_key}"
+                )
+
             out_root = str(out_roots_map[ds_key])
 
             ensure_derivative_description(out_root)
@@ -382,6 +594,9 @@ def main(cfg: DictConfig):
                 prob_clip_min=float(cfg.dataset.prob_clip_min),
                 prob_clip_max=float(cfg.dataset.prob_clip_max),
                 prob_gamma=float(cfg.dataset.prob_gamma),
+                use_probability_map=use_probability_map,
+                use_fixed_initial_surface=use_fixed_initial_surface,
+                fixed_template_root=fixed_template_root,
             )
 
             loader = DataLoader(
@@ -398,6 +613,11 @@ def main(cfg: DictConfig):
             with torch.inference_mode ():
                 for batch in tqdm(loader, desc=f"Infer {ds_key}", leave=False):
                     vol = batch["vol"].to(device)
+                    if vol.ndim != 5 or int(vol.shape[1]) != 1:
+                        raise ValueError(
+                            "Expected MRI-only inference volume shape "
+                            f"(B,1,D,H,W), got {tuple(vol.shape)}"
+                        )
                     B = vol.shape[0]
 
                     padded_init, lengths, per_counts, faces_per_subj, affines, shifts = build_unified_init(
