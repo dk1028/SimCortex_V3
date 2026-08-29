@@ -1,0 +1,39 @@
+# Reproducibility overlay for:
+# src/simcortex/configs/deform/train.yaml
+#
+# Base config commit:
+# 56dfc560e6f9b7c32656d0cf48c0127c8c885d0a
+#
+# Historical final arm: random
+# Expected world size: 2
+# Effective batch:
+#   1 image/GPU x 6 accumulation x 2 GPUs = 12
+
+dataset:
+  use_probability_map: false
+  use_fixed_initial_surface: true
+  fixed_template_root: ${oc.env:SIMCORTEX_RESOURCES_ROOT}/v2c_oasis_random_unsmoothed_seed2025_fixed_template
+
+trainer:
+  seed: 2025
+  img_batch_size: 1
+  grad_accum_steps: 6
+  num_epochs: 600
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  points_per_image: 180000
+  val_points_per_image: 150000
+  scheduler_min_lr: 1.0e-6
+
+model:
+  sigma: 1
+  n_steps: 8
+  c_in: 1
+  gn_groups: 8
+  dropout: 0.1
+
+checkpoint:
+  alpha_lr: 0.015
+
+outputs:
+  root: ${oc.env:SIMCORTEX_RUNS_ROOT}/exp36_hcpya+oasis1_onlyMRI_oasis_sub0447_unsmoothed_2gpu
