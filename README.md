@@ -2,58 +2,303 @@
   <img src="docs/assets/simcortex-logo.png" alt="SimCortex logo" width="320"/>
 </p>
 
-SimCortex v2.0 is the journal-version implementation of SimCortex: a modular and reproducible framework for cortical surface reconstruction in **MNI152 space**. It provides four practical stages that can be run independently or as a full pipeline:
+# SimCortex v2.0 with Fixed-Initialization MRI-Only Deformation
+
+SimCortex v2.0 is a modular and reproducible framework for cortical surface reconstruction in **MNI152 space**.
+
+This branch additionally contains the **fixed-initialization MRI-only deformation experiments**, in which the original subject-specific deformation initialization is replaced by a fixed cortical template.
+
+The official SimCortex v2.0 pipeline remains available in this repository. The fixed-initialization experiments modify only the input contract and architecture of the **deformation stage**.
 
 > **Previous version:** The original ShapeMI/MICCAI 2025 conference implementation is preserved as:
-> - [SimCortex v1.0.0 release](https://github.com/Neuro-iX/SimCortex/releases/tag/v1.0.0)
-> - [Legacy v1 branch](https://github.com/Neuro-iX/SimCortex/tree/legacy/v1-shapemi2025)
-> - [Conference paper](https://arxiv.org/abs/2507.06955)
-
-
-1. **Preprocessing (FreeSurfer to MNI152)**  
-   Export key FreeSurfer volumes and surfaces, register them to MNI152, and write outputs in a **BIDS-derivatives-style** layout.
-
-2. **Segmentation (3D U-Net, MNI space)**  
-   Train and apply a 3D U-Net to predict a **9-class segmentation** in **MNI152 space**, with inference and evaluation utilities.
-
-3. **Initial Surfaces (InitSurf)**  
-   Generate initial White Matter and Pial surfaces from saved segmentation predictions, together with hemisphere SDFs and ribbon outputs.
-
-4. **Deformation (Deform)**  
-   Deform the initial surfaces toward MNI-aligned FreeSurfer target surfaces using geometric losses and optional collision-aware evaluation, and write **deformed surfaces** as BIDS derivatives.
-
-This README focuses on **how to run the pipeline correctly**: expected inputs, produced outputs, folder and file naming conventions, and representative commands for each stage.
-
-The project and the validated Docker runtime support all four stages. Stage 1 consumes existing FreeSurfer outputs and performs registration and resampling in Python with ANTsPy and nibabel.
+>
+> * [SimCortex v1.0.0 release](https://github.com/Neuro-iX/SimCortex/releases/tag/v1.0.0)
+> * [Legacy v1 branch](https://github.com/Neuro-iX/SimCortex/tree/legacy/v1-shapemi2025)
+> * [Conference paper](https://arxiv.org/abs/2507.06955)
 
 ---
 
-## Table of Contents
+## SimCortex pipeline
 
-- [Installation](#installation)
-- [Pre-trained Weights and Official Splits](#pre-trained-weights-and-official-splits)
-- [Configuration](#configuration)
-- [Data and Folder Conventions](#data-and-folder-conventions)
-- [Split File Format](#split-file-format)
-- [Recommended Workflow Order](#recommended-workflow-order)
-- [Stage 1 - Preprocessing (FreeSurfer to MNI152)](#stage-1---preprocessing-freesurfer-to-mni152)
-- [Stage 2 - Segmentation (3D U-Net, MNI space)](#stage-2---segmentation-3d-u-net-mni-space)
-- [Stage 3 - Initial Surfaces (InitSurf)](#stage-3---initial-surfaces-initsurf)
-- [Stage 4 - Deformation (Deform)](#stage-4---deformation-deform)
-- [Docker](#docker)
-- [License](#license)
+The official SimCortex v2.0 workflow contains four stages:
+
+1. **Preprocessing**
+
+   * register MRI and FreeSurfer-derived resources to MNI152
+
+2. **Segmentation**
+
+   * predict a 9-class cortical segmentation using a 3D U-Net
+
+3. **Initial Surfaces (InitSurf)**
+
+   * generate subject-specific white and pial surfaces
+   * generate SDF and cortical ribbon probability resources
+
+4. **Deformation**
+
+   * deform the initial cortical surfaces toward target anatomy
+
+The official pipeline is:
+
+```text
+T1 MRI
+  |
+  v
+Preprocessing
+  |
+  v
+9-class segmentation
+  |
+  v
+InitSurf
+  | \
+  |  +--> ribbon probability
+  |
+  +-----> subject-specific white/pial surfaces
+                |
+                v
+        deformation network
+        MRI + ribbon probability
+                |
+                v
+         final cortical surfaces
+```
 
 ---
 
-## Installation
+# Fixed-Initialization MRI-Only Variant
 
-From the repository root, install the base package in editable mode:
+The fixed-initialization experiments investigate whether the original subject-specific InitSurf initialization can be replaced by a **single fixed cortical template**.
+
+The deformation-stage contract becomes:
+
+```text
+MNI152 T1 MRI
+        +
+fixed initial cortical surfaces
+        |
+        v
+MRI-only deformation network
+        |
+        v
+four multi-scale SVFs
+        |
+        v
+Gaussian smoothing
+        |
+        v
+SVF scaling-and-squaring integration
+        |
+        v
+displacement interpolation at mesh vertices
+        |
+        v
+vertex updates
+        |
+        v
+final cortical surfaces
+```
+
+The important differences from the official deformation stage are:
+
+| Component                    | Official SimCortex v2.0   | Fixed-initialization variant |
+| ---------------------------- | ------------------------- | ---------------------------- |
+| MRI input                    | yes                       | yes                          |
+| Ribbon probability           | yes                       | no                           |
+| Initial surfaces             | subject-specific InitSurf | fixed cortical template      |
+| Deformation channels         | `c_in=2`                  | `c_in=1`                     |
+| Encoder                      | `DualMUNetV2`             | `MUNetV2`                    |
+| Geometry/probability encoder | yes                       | no                           |
+| `GeomInject` fusion          | yes                       | no                           |
+| Multi-scale SVFs             | 4                         | 4                            |
+| Gaussian SVF smoothing       | yes                       | yes                          |
+| SVF integration              | yes                       | yes                          |
+| Vertex updates               | yes                       | yes                          |
+
+The fixed-initialization experiment therefore changes **initialization and conditioning**, while preserving the core deformation mechanics.
+
+Importantly, segmentation and InitSurf have **not been removed from SimCortex itself**. Their implementations remain available as upstream pipeline stages. They are simply not required to provide subject-specific initialization to the final fixed-template deformation experiment.
+
+---
+
+## Fixed-Initialization Experimental Arms
+
+Five final initialization conditions are included:
+
+### Sphere
+
+A canonical subdivision-7 icosphere initialization.
+
+```text
+Sphere
+```
+
+Each surface contains:
+
+```text
+163842 vertices
+327680 faces
+```
+
+---
+
+### Random
+
+An unsmoothed subject-specific initialization selected reproducibly from the OASIS1 training set.
+
+```text
+subject: sub-0447
+dataset: OASIS1
+seed: 2025
+```
+
+---
+
+### Original150k
+
+A fixed anatomical initialization derived from HCP subject:
+
+```text
+sub-298051
+```
+
+The subject was selected using white-surface ASSD-based medoid selection.
+
+The surfaces were then processed using ordinary Taubin smoothing:
+
+```text
+iterations = 150000
+lambda = 0.5
+nu = 0.5
+```
+
+---
+
+### Curv0
+
+The same anatomical source lineage is processed with:
+
+```text
+collision-aware Taubin smoothing
+        |
+        v
+largest-connected-component cleanup
+        |
+        v
+Geometry Central adjustEdgeLengths()
+        |
+        v
+target edge length = 0.618 mm
+curvatureAdaptation = 0
+```
+
+---
+
+### Curv1
+
+Curv1 uses the same collision-aware and LCC-cleaned lineage as Curv0, but uses curvature-adaptive remeshing:
+
+```text
+target edge length = 0.618 mm
+curvatureAdaptation = 1.0
+```
+
+The five arms use the **same MRI-only deformation architecture**.
+
+They are therefore five different **initialization conditions**, not five different neural-network architectures.
+
+Detailed template provenance is available in:
+
+```text
+docs/reproducibility/FIXED_TEMPLATES.md
+```
+
+---
+
+## Reproducibility Documentation
+
+Detailed experimental provenance is provided under:
+
+```text
+docs/reproducibility/
+```
+
+Important documents include:
+
+* [Reproducibility index](docs/reproducibility/README.md)
+* [Official SimCortex vs fixed-initialization variant](docs/reproducibility/UPSTREAM_DELTA.md)
+* [Baseline and experiment provenance](docs/reproducibility/BASELINE.md)
+* [Fixed-template provenance](docs/reproducibility/FIXED_TEMPLATES.md)
+* [Checkpoint compatibility](docs/reproducibility/CHECKPOINT_COMPATIBILITY.md)
+* [Real-MRI inference reproduction](docs/reproducibility/INFERENCE_REPRODUCTION.md)
+
+Machine-readable provenance is stored under:
+
+```text
+manifests/reproducibility/
+```
+
+This includes:
+
+```text
+source_archives.tsv
+training_configs.tsv
+checkpoints.tsv
+fixed_templates.tsv
+checkpoint_compatibility.tsv
+real_mri_smoke.tsv
+```
+
+---
+
+## Reproducibility Status
+
+The reconstructed fixed-initialization experiment currently has the following verification status:
+
+```text
+Official upstream baseline                     PASS
+Source reconstruction                          PASS
+Configuration reconstruction                   PASS
+Five-arm experiment reconstruction             PASS
+Fixed-template provenance                      PASS
+Exact checkpoint provenance                    PASS
+Strict checkpoint compatibility                PASS
+Historical inference launcher provenance       CAPTURED
+Clean Narval real-MRI functional reproduction  PASS
+Exact Neuro-Ix sample40 replay                 NOT PERFORMED
+```
+
+All five final historical deformation checkpoints were verified to load strictly into the clean MRI-only implementation with:
+
+```text
+missing keys = 0
+unexpected keys = 0
+shape mismatches = 0
+```
+
+A functional real-MRI inference test was also completed using a historical HCP_YA test MRI:
+
+```text
+subject = sub-135932
+space = MNI152
+```
+
+The test completed successfully and generated all four cortical surfaces with preserved mesh topology.
+
+The clean functional reproduction should **not** be interpreted as an exact replay of the historical Neuro-Ix sample40 external evaluation.
+
+---
+
+# Installation
+
+From the repository root:
 
 ```bash
 python -m pip install -e .
 ```
 
-Verify the command-line interface:
+Verify the CLI:
 
 ```bash
 simcortex --help
@@ -63,58 +308,43 @@ simcortex initsurf --help
 simcortex deform --help
 ```
 
-### Stage-specific extras
-
-Install the extras required by the stages you plan to run:
+## Stage-specific extras
 
 ```bash
-# Stage 1: ANTsPy preprocessing
+# Stage 1: preprocessing
 python -m pip install -e ".[preproc]"
 
-# Stage 2: MONAI segmentation
+# Stage 2: segmentation
 python -m pip install -e ".[seg]"
 
 # PyTorch runtime
 python -m pip install -e ".[torch]"
 
-# Optional deformation collision and mesh metrics
+# Optional deformation metrics and collision evaluation
 python -m pip install -e ".[deform-metrics]"
 ```
 
-To install all extras currently declared by the project:
+To install all declared extras:
 
 ```bash
 python -m pip install -e ".[preproc,seg,torch,deform-metrics]"
 ```
 
-### PyTorch3D
+---
 
-The deformation stack requires PyTorch3D. It is not declared as a
-generic pip extra because its installation must be compatible with the
-selected PyTorch and CUDA versions. Install a compatible PyTorch3D
-build separately, or use the validated Docker environment.
+## PyTorch3D
 
-### FreeSurfer inputs
+The deformation stack requires PyTorch3D.
 
-Stage 1 consumes existing FreeSurfer subject outputs, including
-volumes under `mri/` and cortical surfaces under `surf/`. SimCortex
-does not run FreeSurfer itself.
+PyTorch3D is not declared as a generic pip extra because installation must match the selected PyTorch and CUDA versions.
+
+Install a compatible PyTorch3D build separately or use the validated container environment.
 
 ---
 
-## Pre-trained Weights and Official Splits
+# Configuration
 
-Official pre-trained checkpoints and dataset split files are available on Zenodo:
-
-- **Zenodo record:** [SimCortex v2.0: Pre-trained Models and Dataset Splits](https://zenodo.org/records/18974730)
-
-This record currently provides the packaged segmentation weights, deformation weights, and split CSV files used for evaluation and reproducible experiments.
-
----
-
-## Configuration
-
-All configurable stages use Hydra YAML files shipped with the package under:
+Hydra configuration files are provided under:
 
 ```text
 src/simcortex/configs/
@@ -123,62 +353,60 @@ src/simcortex/configs/
   deform/
 ```
 
-You can configure runs in two main ways.
+Fixed-initialization experiment overlays are stored under:
 
-### 1. Edit the stage YAML
-
-This is recommended for stable experiments and longer runs.
-
-Examples:
-
-```bash
-simcortex seg train
-simcortex initsurf generate
-simcortex deform eval
+```text
+configs/fixed_init/
 ```
 
-### 2. Use Hydra overrides directly on the CLI
+The five final overlays are:
 
-This is recommended for quick tests or one-off experiments.
-
-Examples:
-
-```bash
-simcortex seg train outputs.root=/tmp/simcortex_runs/seg/exp01
+```text
+sphere.yaml
+random.yaml
+original150k.yaml
+curv0.yaml
+curv1.yaml
 ```
 
-```bash
-simcortex deform eval dataset.split_name=test outputs.out_dir=/tmp/deform_eval
+The fixed-initialization deformation configuration uses:
+
+```yaml
+dataset:
+  use_probability_map: false
+  use_fixed_initial_surface: true
+  fixed_template_root: null
+
+model:
+  c_in: 1
+  strict_load: true
+  sigma: 1
+  n_steps: 8
+  inshape: [184, 224, 184]
+  c_hid: [8, 16, 32, 64, 128, 128]
+  gn_groups: 8
+  dropout: 0.1
 ```
 
-### 3. Use a separate user config file
+A valid fixed-template directory must contain:
 
-If a stage supports a `user_config` field, you can point it to a separate YAML file and keep the packaged defaults unchanged.
-
-Example pattern:
-
-```bash
-simcortex deform train user_config=/path/to/my_train.yaml
+```text
+lh_pial_smoothed.ply
+lh_white_smoothed.ply
+rh_pial_smoothed.ply
+rh_white_smoothed.ply
 ```
 
 ---
 
-## Data and Folder Conventions
+# Data and Folder Conventions
 
-You will typically work with **two roots**:
-
-1. **Code repository**  
-   This repository contains code, configs, scripts, and package metadata.
-
-2. **Dataset root**  
-   Each dataset has its own BIDS-style root with raw data, derivatives, and split files.
-
-Recommended structure:
+A typical dataset layout is:
 
 ```text
 datasets/<dataset-name>/
-  bids/                 # raw BIDS dataset
-  derivatives/          # processed outputs (BIDS derivatives)
+  bids/
+  derivatives/
     freesurfer-7.4.1/
     sc-preproc/
     sc-seg/
@@ -188,33 +416,26 @@ datasets/<dataset-name>/
     <dataset>_split.csv
 ```
 
-SimCortex reads inputs from `derivatives/` and writes outputs back to `derivatives/` using **BIDS-derivatives-style naming**.
+Typical naming conventions:
 
-### Typical naming principles
-
-- subject IDs follow `sub-XXXX`
-- sessions are typically written as `ses-01`
-- MNI outputs are labeled with `space-MNI152`
-- segmentation outputs use `desc-seg9_dseg`
-- InitSurf produces both mesh outputs and SDF / ribbon outputs
-- Deform writes final surface meshes under `sc-deform`
-
-> **Canonical derivative directories:** each stage uses one stable directory name: `sc-preproc`, `sc-seg`, `sc-initsurf`, and `sc-deform`. Execution numbers and experiment identifiers must not be appended to these directory names.
-
-> Important: keep dataset naming and folder organization consistent across stages. In practice, this makes multi-stage and multi-dataset workflows much easier to maintain.
+* subjects: `sub-XXXX`
+* sessions: `ses-01`
+* MNI space: `space-MNI152`
+* segmentation: `desc-seg9_dseg`
+* deformation outputs: `desc-deform`
 
 ---
 
-## Split File Format
+# Split File Format
 
-A split CSV is required for Segmentation, InitSurf, and Deform.
-
-### Single-dataset split
+## Single-dataset split
 
 Minimum columns:
 
-- `subject` (for example `sub-0001`)
-- `split` in `{train, val, test}`
+```text
+subject
+split
+```
 
 Example:
 
@@ -225,11 +446,15 @@ sub-0002,val
 sub-0003,test
 ```
 
-### Multi-dataset split
+## Multi-dataset split
 
-Add one more column:
+Use:
 
-- `dataset` (must match the keys used in Hydra config overrides, such as `HCP_YA` or `OASIS1`)
+```text
+subject
+split
+dataset
+```
 
 Example:
 
@@ -240,83 +465,75 @@ sub-101915,test,HCP_YA
 sub-0001,test,OASIS1
 ```
 
-### Important note
+The dataset names in the CSV must match the corresponding Hydra dataset-root keys.
 
-In multi-dataset workflows, the `dataset` values in the CSV must match the names used in overrides such as:
+---
+
+# Recommended Workflows
+
+## Official SimCortex workflow
 
 ```text
-dataset.roots.HCP_YA
-dataset.seg_roots.HCP_YA
-outputs.out_roots.HCP_YA
+Preprocessing
+     |
+     v
+Segmentation
+     |
+     v
+InitSurf
+     |
+     v
+Deformation
+```
+
+In command form:
+
+1. create `sc-preproc`
+2. train/run segmentation to create `sc-seg`
+3. generate `sc-initsurf`
+4. train/infer/evaluate deformation to create `sc-deform`
+
+---
+
+## Fixed-Initialization MRI-Only workflow
+
+For the final fixed-template experiments:
+
+```text
+preprocessed MNI152 MRI
+        +
+fixed cortical template
+        |
+        v
+MRI-only deformation
+        |
+        v
+final cortical surfaces
+```
+
+The final deformation stage therefore does not require a subject-specific InitSurf directory or ribbon probability map.
+
+The fixed template is provided through:
+
+```text
+dataset.fixed_template_root
 ```
 
 ---
 
-## Recommended Workflow Order
+# Stage 1 - Preprocessing
 
-A typical full workflow is:
+Stage 1 creates MNI152-aligned MRI and associated FreeSurfer-derived resources.
 
-1. Run **Preprocessing** for each dataset to create `sc-preproc`
-2. Train **Segmentation** and select a checkpoint
-3. Run **Segmentation inference** to create `sc-seg`
-4. Run **InitSurf** to create `sc-initsurf`
-5. Train, infer, and evaluate **Deformation** to create `sc-deform`
+It can:
 
-This staged design is intentional and makes debugging, ablation, and evaluation easier.
+1. export FreeSurfer MRI volumes
+2. apply optional N4 correction
+3. estimate native-to-MNI registration
+4. resample volumes into MNI152
+5. transform cortical surfaces into MNI152 space
 
----
-
-## Stage 1 - Preprocessing (FreeSurfer to MNI152)
-
-This stage converts key **FreeSurfer 7.4.1 outputs** into a **BIDS-derivatives-style** layout, applies optional **N4 bias-field correction** to the T1 image, estimates a **linear registration** (**rigid** or **affine**) from native T1w space to **MNI152**, resamples the main volumetric outputs into MNI space, and writes both **native/scanner-space** and **MNI-space** cortical surfaces as ASCII PLY files.
-
-The current implementation is fully Python-based for preprocessing and no longer depends on external command-line tools.
-
-### What this stage does
-
-For each FreeSurfer subject, Stage 1 performs the following steps:
-
-1. Export native FreeSurfer volumes from MGZ to NIfTI using `nibabel`
-2. Optionally apply **N4 bias-field correction** to `orig.mgz` using **ANTsPy**
-3. Estimate a **linear transform** (`rigid` or `affine`) from native T1w to the MNI template using **ANTsPy**
-4. Resample FreeSurfer-derived volumes into **MNI152 space**
-5. Read FreeSurfer cortical surfaces directly in Python, convert them from **surface/tkRAS** to **scanner/world RAS**, and write:
-   - native/scanner-space PLY surfaces
-   - MNI-space PLY surfaces
-
-### Inputs
-
-- A FreeSurfer derivatives root containing subject folders with at least:
-  - `mri/orig.mgz`
-  - `mri/aseg.mgz`
-  - `mri/aparc+aseg.mgz`
-  - `mri/filled.mgz`
-  - `surf/lh.white`, `surf/rh.white`
-  - `surf/lh.pial`, `surf/rh.pial` (or `*.pial.T1` if present)
-- An MNI template image, for example:
-
-```text
-src/MNI152_T1_1mm.nii.gz
-```
-
-### Python dependencies
-
-Stage 1 requires Python packages including:
-
-- `antspyx`
-- `nibabel`
-- `numpy`
-- `typer`
-
-### Notes
-
-* **`--transform-type`**: Can be either `rigid` or `affine`.
-* **`--n4`**: Enables N4 bias-field correction before registration.
-* **`--with-aparc-aseg`** and **`--with-filled`**: Control whether those optional FreeSurfer outputs are also exported and resampled.
-* **Surface outputs**: Are written as `.surf.ply`.
-* **`--overwrite`**: Recompute outputs even if they already exist.
-
-### Run for all discovered subjects
+Typical command:
 
 ```bash
 simcortex fs-to-mni \
@@ -330,125 +547,49 @@ simcortex fs-to-mni \
   -v
 ```
 
-### Run for selected subjects
-
-```bash
-simcortex fs-to-mni \
-  --freesurfer-root /path/to/datasets/<dataset>/derivatives/freesurfer-7.4.1 \
-  --out-deriv-root /path/to/datasets/<dataset>/derivatives/sc-preproc \
-  --mni-template /path/to/SimCortex/src/MNI152_T1_1mm.nii.gz \
-  --participant-label sub-0001 \
-  --participant-label sub-0019 \
-  --transform-type affine \
-  --n4 \
-  --with-aparc-aseg \
-  --with-filled \
-  -v
-```
-
-### Output layout
-A typical subject output looks like:
+A typical output includes:
 
 ```text
 sc-preproc/
-  dataset_description.json
   sub-XXXX/
     ses-01/
       anat/
-        sub-XXXX_ses-01_desc-fsraw_T1w.nii.gz
-        sub-XXXX_ses-01_desc-preproc_T1w.nii.gz
-        sub-XXXX_ses-01_desc-aseg_dseg.nii.gz
-        sub-XXXX_ses-01_desc-aparc+aseg_dseg.nii.gz
-        sub-XXXX_ses-01_desc-filled_T1w.nii.gz
-
         sub-XXXX_ses-01_space-MNI152_desc-preproc_T1w.nii.gz
-        sub-XXXX_ses-01_space-MNI152_desc-aseg_dseg.nii.gz
-        sub-XXXX_ses-01_space-MNI152_desc-aparc+aseg_dseg.nii.gz
-        sub-XXXX_ses-01_space-MNI152_desc-filled_T1w.nii.gz
-
-        sub-XXXX_ses-01_from-T1w_to-MNI152_mode-image_xfm.txt
-        sub-XXXX_ses-01_from-MNI152_to-T1w_mode-image_xfm.txt
-        sub-XXXX_ses-01_from-T1w_to-MNI152_mode-image_xfm.json
-        sub-XXXX_ses-01_from-T1w_to-MNI152_mode-image_desc-antsAffine.mat
-
       surfaces/
-        sub-XXXX_ses-01_hemi-L_white.surf.ply
-        sub-XXXX_ses-01_hemi-L_pial.surf.ply
-        sub-XXXX_ses-01_hemi-R_white.surf.ply
-        sub-XXXX_ses-01_hemi-R_pial.surf.ply
-
         sub-XXXX_ses-01_space-MNI152_hemi-L_white.surf.ply
         sub-XXXX_ses-01_space-MNI152_hemi-L_pial.surf.ply
         sub-XXXX_ses-01_space-MNI152_hemi-R_white.surf.ply
         sub-XXXX_ses-01_space-MNI152_hemi-R_pial.surf.ply
 ```
 
-### What this stage provides to later stages
-
-Stage 1 provides the MNI-aligned T1w image and MNI-aligned FreeSurfer-derived target volumes and surfaces used by later stages of the SimCortex pipeline.
+The fixed-initialization MRI-only deformation experiments still require the MNI152 T1 MRI produced by preprocessing.
 
 ---
 
-## Stage 2 - Segmentation (3D U-Net, MNI space)
+# Stage 2 - Segmentation
 
-This stage trains and applies a 3D U-Net to predict a **9-class segmentation** in **MNI152 space** using Stage 1 preprocessing outputs.
+The official SimCortex segmentation stage trains or applies a 3D U-Net to predict a 9-class segmentation in MNI152 space.
 
-### Expected inputs from Stage 1
-
-For each subject under `sc-preproc`:
-
-- `..._space-MNI152_desc-preproc_T1w.nii.gz`
-- `..._space-MNI152_desc-aparc+aseg_dseg.nii.gz`
-- `..._space-MNI152_desc-filled_T1w.nii.gz`
-
-### Output prediction naming
-
-Segmentation predictions are written under `sc-seg` as:
+Typical output:
 
 ```text
-sub-XXXX/ses-01/anat/sub-XXXX_ses-01_space-MNI152_desc-seg9_dseg.nii.gz
+sc-seg/
+  sub-XXXX/
+    ses-01/
+      anat/
+        sub-XXXX_ses-01_space-MNI152_desc-seg9_dseg.nii.gz
 ```
 
-### Single-dataset training
-Use dataset.path and a split CSV for that dataset.
+Example:
 
 ```bash
 simcortex seg train \
   dataset.path=/path/to/datasets/<dataset>/derivatives/sc-preproc \
   dataset.split_file=/path/to/datasets/<dataset>/splits/dataset_split.csv \
-  outputs.root=/path/to/simcortex-runs/seg/exp01 \
-  trainer.use_ddp=false
-```
-### Multi-dataset training
-Use a combined split CSV with a dataset column and provide one root per dataset.
-
-```bash
-simcortex seg train \
-  dataset.split_file=/path/to/datasets/splits/dataset_split.csv \
-  dataset.roots.HCP_YA=/path/to/datasets/hcpya-u100/derivatives/sc-preproc \
-  dataset.roots.OASIS1=/path/to/datasets/oasis-1/derivatives/sc-preproc \
-  outputs.root=/path/to/simcortex-runs/seg/exp01_hcpya+oasis1 \
-  trainer.use_ddp=false
+  outputs.root=/path/to/simcortex-runs/seg/exp01
 ```
 
-### Multi-GPU DDP training
-
-```bash
-simcortex seg train --torchrun --nproc-per-node 2 \
-  dataset.split_file=/path/to/datasets/splits/dataset_split.csv \
-  dataset.roots.HCP_YA=/path/to/datasets/hcpya-u100/derivatives/sc-preproc \
-  dataset.roots.OASIS1=/path/to/datasets/oasis-1/derivatives/sc-preproc \
-  outputs.root=/path/to/simcortex-runs/seg/exp01_hcpya+oasis1 \
-  trainer.use_ddp=true
-```
-
-### Inference
-
-Segmentation inference supports both **single-dataset** and **multi-dataset** execution.
-
-#### Single-dataset inference
-
-Use `dataset.path` and `outputs.out_root` when running inference for one dataset only.
+Inference example:
 
 ```bash
 simcortex seg infer \
@@ -458,280 +599,258 @@ simcortex seg infer \
   model.ckpt_path=/path/to/seg_best_dice.pt \
   outputs.out_root=/path/to/datasets/<dataset>/derivatives/sc-seg
 ```
-In this mode, predictions are written under:
-```text
-/path/to/datasets/<dataset>/derivatives/sc-seg/sub-XXXX/ses-01/anat/sub-XXXX_ses-01_space-MNI152_desc-seg9_dseg.nii.gz
-```
-Note: for single-dataset inference, dataset.split_file should normally refer to a split CSV for that dataset only.
 
-### Multi-dataset inference 
+This stage remains part of official SimCortex.
 
-Use dataset.roots and outputs.out_roots when running inference across multiple datasets from one combined split file.
-
-```bash
-simcortex seg infer \
-  dataset.split_file=/path/to/datasets/splits/dataset_split.csv \
-  dataset.split_name=test \
-  dataset.roots.HCP_YA=/path/to/datasets/hcpya-u100/derivatives/sc-preproc \
-  dataset.roots.OASIS1=/path/to/datasets/oasis-1/derivatives/sc-preproc \
-  model.ckpt_path=/path/to/seg_best_dice.pt \
-  outputs.out_roots.HCP_YA=/path/to/datasets/hcpya-u100/derivatives/sc-seg \
-  outputs.out_roots.OASIS1=/path/to/datasets/oasis-1/derivatives/sc-seg
-```
-
-### Evaluation
-
-For one dataset:
-
-```bash
-simcortex seg eval \
-  dataset.path=/path/to/datasets/<dataset>/derivatives/sc-preproc \
-  dataset.split_file=/path/to/datasets/<dataset>/splits/dataset_split.csv \
-  dataset.split_name=test \
-  outputs.pred_root=/path/to/datasets/<dataset>/derivatives/sc-seg \
-  outputs.eval_csv=/path/to/simcortex-runs/seg/exp01/evals/seg_eval_test.csv \
-  outputs.eval_xlsx=/path/to/simcortex-runs/seg/exp01/evals/seg_eval_test.xlsx
-```
-For multiple datasets:
-
-```bash
-simcortex seg eval \
-  dataset.split_file=/path/to/datasets/splits/dataset_split.csv \
-  dataset.split_name=test \
-  dataset.roots.HCP_YA=/path/to/datasets/hcpya-u100/derivatives/sc-preproc \
-  dataset.roots.OASIS1=/path/to/datasets/oasis-1/derivatives/sc-preproc \
-  outputs.pred_roots.HCP_YA=/path/to/datasets/hcpya-u100/derivatives/sc-seg \
-  outputs.pred_roots.OASIS1=/path/to/datasets/oasis-1/derivatives/sc-seg \
-  outputs.eval_csv=/path/to/simcortex-runs/seg/exp01/evals/seg_eval_test.csv \
-  outputs.eval_xlsx=/path/to/simcortex-runs/seg/exp01/evals/seg_eval_test.xlsx
-```
+It is not required for the **final fixed-template deformation input path** when an existing MNI152 MRI and fixed template are supplied.
 
 ---
 
-## Stage 3 - Initial Surfaces (InitSurf)
+# Stage 3 - Initial Surfaces (InitSurf)
 
-This stage generates initial cortical surfaces from **saved segmentation predictions**. It is not an end-to-end segmentation-to-surface training stage; instead, it consumes Stage 1 and Stage 2 outputs.
+The official InitSurf stage generates subject-specific cortical initialization from saved segmentation predictions.
 
-### Inputs
-
-- Preprocessing derivatives (`sc-preproc`) for the MNI-aligned T1 image
-- Segmentation derivatives (`sc-seg`) for `..._desc-seg9_dseg.nii.gz`
-- split CSV
-
-### Output layout
+Outputs include:
 
 ```text
 sc-initsurf/
-  dataset_description.json
   sub-XXXX/
     ses-01/
       anat/
-        sub-XXXX_ses-01_space-MNI152_desc-seg9_dseg_used.nii.gz
-        sub-XXXX_ses-01_space-MNI152_desc-seg9_dseg_cleaned.nii.gz
-        sub-XXXX_ses-01_space-MNI152_desc-lh_white_sdf.nii.gz
-        sub-XXXX_ses-01_space-MNI152_desc-rh_white_sdf.nii.gz
-        sub-XXXX_ses-01_space-MNI152_desc-lh_pial_sdf.nii.gz
-        sub-XXXX_ses-01_space-MNI152_desc-rh_pial_sdf.nii.gz
-        sub-XXXX_ses-01_space-MNI152_desc-ribbon_sdf.nii.gz
-        sub-XXXX_ses-01_space-MNI152_desc-ribbon_prob.nii.gz
+        ..._desc-lh_white_sdf.nii.gz
+        ..._desc-rh_white_sdf.nii.gz
+        ..._desc-lh_pial_sdf.nii.gz
+        ..._desc-rh_pial_sdf.nii.gz
+        ..._desc-ribbon_sdf.nii.gz
+        ..._desc-ribbon_prob.nii.gz
+
       surfaces/
-        sub-XXXX_ses-01_space-MNI152_hemi-L_white.surf.ply
-        sub-XXXX_ses-01_space-MNI152_hemi-L_pial.surf.ply
-        sub-XXXX_ses-01_space-MNI152_hemi-R_white.surf.ply
-        sub-XXXX_ses-01_space-MNI152_hemi-R_pial.surf.ply
+        ..._hemi-L_white.surf.ply
+        ..._hemi-L_pial.surf.ply
+        ..._hemi-R_white.surf.ply
+        ..._hemi-R_pial.surf.ply
 ```
-### Single-dataset example
+
+Example:
 
 ```bash
 simcortex initsurf generate \
   dataset.path=/path/to/datasets/<dataset>/derivatives/sc-preproc \
   dataset.seg_root=/path/to/datasets/<dataset>/derivatives/sc-seg \
   dataset.split_file=/path/to/datasets/<dataset>/splits/dataset_split.csv \
-  dataset.split_name=all \
-  outputs.out_root=/path/to/datasets/<dataset>/derivatives/sc-initsurf \
-  outputs.log_dir=/path/to/simcortex-runs/initsurf/exp01/logs_generate
+  outputs.out_root=/path/to/datasets/<dataset>/derivatives/sc-initsurf
 ```
 
-### Multi-dataset example
+In official SimCortex, these subject-specific surfaces and ribbon resources are passed to deformation.
 
-```bash
-simcortex initsurf generate \
-  dataset.split_file=/path/to/datasets/splits/dataset_split.csv \
-  dataset.split_name=all \
-  dataset.roots.HCP_YA=/path/to/datasets/hcpya-u100/derivatives/sc-preproc \
-  dataset.roots.OASIS1=/path/to/datasets/oasis-1/derivatives/sc-preproc \
-  dataset.seg_roots.HCP_YA=/path/to/datasets/hcpya-u100/derivatives/sc-seg \
-  dataset.seg_roots.OASIS1=/path/to/datasets/oasis-1/derivatives/sc-seg \
-  outputs.out_roots.HCP_YA=/path/to/datasets/hcpya-u100/derivatives/sc-initsurf \
-  outputs.out_roots.OASIS1=/path/to/datasets/oasis-1/derivatives/sc-initsurf \
-  outputs.log_dir=/path/to/simcortex-runs/initsurf/exp01/logs_generate
-```
+In the fixed-initialization experiments, this subject-specific initialization dependency is replaced by a fixed template.
 
-### Typical runtime
-
-A typical runtime is approximately 70–110 s / subject with `n_workers: 8`,
-depending on hardware, I/O speed, and dataset characteristics.
 ---
 
-## Stage 4 - Deformation (Deform)
+# Stage 4 - Deformation
 
-This stage deforms the InitSurf meshes toward the MNI-aligned FreeSurfer target surfaces.
+## Official SimCortex deformation
 
-### Inputs
-
-- Preprocessing derivatives (`sc-preproc`) containing:
-  - MNI T1
-  - target FreeSurfer surfaces in MNI space
-- InitSurf derivatives (`sc-initsurf`) containing:
-  - initial surfaces
-  - ribbon probability volumes
-- split CSV
-
-### Outputs
-
-During **inference**, the stage writes deformed surfaces under `sc-deform`:
+The official deformation stage receives:
 
 ```text
-sc-deform/
-  dataset_description.json
-  sub-XXXX/
-    ses-01/
-      surfaces/
-        sub-XXXX_ses-01_space-MNI152_desc-deform_hemi-L_white.surf.ply
-        sub-XXXX_ses-01_space-MNI152_desc-deform_hemi-L_pial.surf.ply
-        sub-XXXX_ses-01_space-MNI152_desc-deform_hemi-R_white.surf.ply
-        sub-XXXX_ses-01_space-MNI152_desc-deform_hemi-R_pial.surf.ply
+MNI152 MRI
++
+ribbon probability
++
+subject-specific InitSurf surfaces
 ```
 
-### Training example
-Use dataset.path and dataset.initsurf_root for one dataset.
-```bash
-simcortex deform train \
-  dataset.path=/path/to/datasets/<dataset>/derivatives/sc-preproc \
-  dataset.initsurf_root=/path/to/datasets/<dataset>/derivatives/sc-initsurf \
-  dataset.split_file=/path/to/datasets/<dataset>/splits/dataset_split.csv \
-  outputs.root=/path/to/simcortex-runs/deform/exp01
-```
-### Multi-dataset training
-Use a combined split CSV with a dataset column and provide one preprocessing root and one InitSurf root per dataset.
-```bash
-simcortex deform train --torchrun --nproc-per-node 2 \
-  dataset.split_file=/path/to/datasets/splits/dataset_split.csv \
-  dataset.roots.HCP_YA=/path/to/datasets/hcpya-u100/derivatives/sc-preproc \
-  dataset.roots.OASIS1=/path/to/datasets/oasis-1/derivatives/sc-preproc \
-  dataset.initsurf_roots.HCP_YA=/path/to/datasets/hcpya-u100/derivatives/sc-initsurf \
-  dataset.initsurf_roots.OASIS1=/path/to/datasets/oasis-1/derivatives/sc-initsurf \
-  outputs.root=/path/to/simcortex-runs/deform/exp01_hcpya+oasis1
+The default official architecture uses:
+
+```text
+DualMUNetV2
+c_in = 2
 ```
 
-### Inference
-
-For one dataset:
-
-```bash
-simcortex deform infer \
-  dataset.path=/path/to/datasets/<dataset>/derivatives/sc-preproc \
-  dataset.initsurf_root=/path/to/datasets/<dataset>/derivatives/sc-initsurf \
-  dataset.split_file=/path/to/datasets/<dataset>/splits/dataset_split.csv \
-  dataset.split_name=test \
-  model.ckpt_path=/path/to/deform_best_rmse.pth \
-  outputs.out_root=/path/to/datasets/<dataset>/derivatives/sc-deform
-```
-For multiple datasets:
-```bash
-simcortex deform infer \
-  dataset.split_file=/path/to/datasets/splits/dataset_split.csv \
-  dataset.split_name=test \
-  dataset.roots.HCP_YA=/path/to/datasets/hcpya-u100/derivatives/sc-preproc \
-  dataset.roots.OASIS1=/path/to/datasets/oasis-1/derivatives/sc-preproc \
-  dataset.initsurf_roots.HCP_YA=/path/to/datasets/hcpya-u100/derivatives/sc-initsurf \
-  dataset.initsurf_roots.OASIS1=/path/to/datasets/oasis-1/derivatives/sc-initsurf \
-  model.ckpt_path=/path/to/deform_best_rmse.pth \
-  outputs.out_roots.HCP_YA=/path/to/datasets/hcpya-u100/derivatives/sc-deform \
-  outputs.out_roots.OASIS1=/path/to/datasets/oasis-1/derivatives/sc-deform
-```
-
-### Evaluation
-
-For one dataset:
-
-```bash
-simcortex deform eval \
-  dataset.path=/path/to/datasets/<dataset>/derivatives/sc-preproc \
-  dataset.split_file=/path/to/datasets/<dataset>/splits/dataset_split.csv \
-  dataset.split_name=test \
-  outputs.pred_root=/path/to/datasets/<dataset>/derivatives/sc-deform \
-  outputs.out_dir=/path/to/simcortex-runs/deform/exp01/eval_test
-```
-For multiple datasets:
-```bash
-simcortex deform eval \
-  dataset.split_file=/path/to/datasets/splits/dataset_split.csv \
-  dataset.split_name=test \
-  dataset.roots.HCP_YA=/path/to/datasets/hcpya-u100/derivatives/sc-preproc \
-  dataset.roots.OASIS1=/path/to/datasets/oasis-1/derivatives/sc-preproc \
-  outputs.pred_roots.HCP_YA=/path/to/datasets/hcpya-u100/derivatives/sc-deform \
-  outputs.pred_roots.OASIS1=/path/to/datasets/oasis-1/derivatives/sc-deform \
-  outputs.out_dir=/path/to/simcortex-runs/deform/exp01_hcpya+oasis1/eval_test
-```
-
-### Evaluation outputs
-
-This stage writes the following Excel reports:
-
-- `surface_metrics.xlsx`
-- `collision_metrics.xlsx`
-- `collision_metrics_enhanced.xlsx`
-- `collision_summary.xlsx`
+with separate MRI and geometry/probability branches.
 
 ---
 
-## Docker
+## Fixed-Initialization MRI-Only Deformation
 
+The fixed-init deformation stage instead receives:
 
-Docker support is provided as an **execution environment** for the SimCortex pipeline.
+```text
+MNI152 MRI
++
+fixed template surfaces
+```
 
-The main Docker image is intended to support **all four stages**:
+with:
 
-- **Stage 1 — Preprocessing**
-- **Stage 2 — Segmentation**
-- **Stage 3 — InitSurf**
-- **Stage 4 — Deform**
+```text
+MUNetV2
+c_in = 1
+```
 
-Basic CLI check:
+Ribbon probability input is disabled:
+
+```yaml
+dataset.use_probability_map: false
+```
+
+and fixed initialization is enabled:
+
+```yaml
+dataset.use_fixed_initial_surface: true
+```
+
+A fixed template must be supplied:
+
+```yaml
+dataset.fixed_template_root: /path/to/fixed/template
+```
+
+---
+
+## Deformation Mechanism
+
+The network predicts four stationary velocity fields:
+
+```text
+SVF1
+SVF2
+SVF3
+SVF4
+```
+
+Each deformation update follows:
+
+```text
+predicted SVF
+     |
+     v
+Gaussian smoothing
+     |
+     v
+scaling-and-squaring integration
+     |
+     v
+displacement field
+     |
+     v
+interpolation at mesh vertices
+     |
+     v
+vertex update
+```
+
+The four updates are applied sequentially to the cortical mesh.
+
+---
+
+## Fixed-Initialization Inference Example
+
+A fixed-template inference run requires:
+
+```text
+MNI152 preprocessing root
+split file
+fixed template
+MRI-only checkpoint
+output root
+```
+
+Representative configuration:
+
+```yaml
+dataset:
+  split_name: test
+  use_probability_map: false
+  use_fixed_initial_surface: true
+  fixed_template_root: /path/to/template
+
+model:
+  ckpt_path: /path/to/deform_best_rmse.pth
+  c_in: 1
+  strict_load: true
+  n_steps: 8
+```
+
+---
+
+# Offline Fixed-Template Preparation
+
+Several geometry operations used in the experimental templates are **template-preparation operations**, not per-subject prediction postprocessing.
+
+These include:
+
+```text
+Taubin smoothing
+collision-aware smoothing
+largest-connected-component cleanup
+Geometry Central adjustEdgeLengths()
+uniform edge-only remeshing
+curvature-adaptive remeshing
+```
+
+The resulting mesh becomes the shared initialization supplied to training and inference.
+
+These operations are therefore performed **before** subject-level deformation inference.
+
+---
+
+# Evaluation
+
+Deformation evaluation can compute surface geometry and collision metrics.
+
+Typical outputs include:
+
+```text
+surface_metrics.xlsx
+collision_metrics.xlsx
+collision_metrics_enhanced.xlsx
+collision_summary.xlsx
+```
+
+The historical final external evaluation also included exact FCL collision evaluation.
+
+The five fixed-initialization conditions were compared using the same evaluation framework so that changes could be attributed primarily to initialization geometry.
+
+---
+
+# Docker
+
+Docker support is provided as an execution environment for SimCortex.
+
+The main image supports:
+
+* Stage 1: preprocessing
+* Stage 2: segmentation
+* Stage 3: InitSurf
+* Stage 4: deformation
+
+Basic test:
 
 ```bash
 docker run --rm simcortex:2.0.0 simcortex --help
 ```
 
-GPU visibility check:
+GPU test:
 
 ```bash
 docker run --rm --gpus all simcortex:2.0.0 \
   python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.device_count())"
 ```
 
-A local Docker build requires the separately supplied `docker/simcortex-env.tar.gz` archive. This archive is intentionally excluded from Git. Its validated checksum and the complete build procedure are documented in `docker/README.md`.
-
-For full Docker usage, including:
-
-- the Docker Hub repository and versioned image tag after publication: [kavehmoradkhani/simcortex](https://hub.docker.com/r/kavehmoradkhani/simcortex)
-- running as the host user with `--user $(id -u):$(id -g)`
-- mounting datasets and outputs with `-v`
-- passing Hydra overrides from the CLI
-- extracting packaged YAML configs from inside the container
-- using custom edited YAML files
-- stage-specific Docker command examples for **Stage 1–4**
-- shared server and Apptainer notes
-
-see:
+For complete Docker usage see:
 
 ```text
 docker/README.md
 ```
 
+Docker Hub:
+
+[kavehmoradkhani/simcortex](https://hub.docker.com/r/kavehmoradkhani/simcortex)
+
 ---
 
-## License
+# License
 
 See the repository `LICENSE` file.
