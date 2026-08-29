@@ -157,7 +157,7 @@ seed: 2025
 
 ### Original150k
 
-A fixed anatomical initialization derived from HCP subject:
+A fixed anatomical initialization derived from HCP subject with the smallest ASSD value:
 
 ```text
 sub-298051
