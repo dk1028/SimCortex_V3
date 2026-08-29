@@ -9,9 +9,6 @@ dataset:
   roots:
     HCP_YA: /path/to/hcpya-u100/derivatives/sc-preproc
     OASIS1: /path/to/oasis-1/derivatives/sc-preproc
-  initsurf_roots:
-    HCP_YA: /path/to/hcpya-u100/derivatives/sc-initsurf
-    OASIS1: /path/to/oasis-1/derivatives/sc-initsurf
   surface_name:
     - lh_pial
     - lh_white
@@ -21,6 +18,9 @@ dataset:
   prob_clip_max: 1.0
   prob_gamma: 1.0
   strict_missing: true
+  use_probability_map: false
+  use_fixed_initial_surface: true
+  fixed_template_root: null
 
   aug_prob: 0.3
   aug_rot_range_deg: 3.0
@@ -79,11 +79,8 @@ model:
     - 64
     - 128
     - 128
-  c_in: 2
-  geom_ratio: 0.5
-  geom_depth: 6
+  c_in: 1
   gn_groups: 8
-  gate_init: -3.0
   dropout: 0.1
   init_ckpt: null
   init_strict: true
@@ -102,7 +99,7 @@ objective:
   hd_lambda_mm: 0.75
   hd_points: 50000
 
-  # Nearest-normal signed nesting proxy; preserve 8.0 for exp33 reproducibility.
+  # Nearest-normal signed nesting proxy.
   signed_nested_weight: 8.0
   signed_margin_mm: 0.55
   signed_points: 50000
@@ -120,5 +117,5 @@ checkpoint:
   require_collision_for_best: true
 
 outputs:
-  root: /path/to/simcortex-runs/deform/exp33_hcpya+oasis1
+  root: /path/to/simcortex-runs/deform/fixed_init
   allow_existing: false
