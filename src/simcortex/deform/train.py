@@ -276,14 +276,48 @@ def validate_deform_training_config(cfg: DictConfig) -> None:
     channels = tuple(int(value) for value in cfg.model.c_hid)
     if len(channels) != 6 or any(value <= 0 for value in channels):
         raise ValueError(f"model.c_hid must contain six positive integers, got {channels}")
-    if int(cfg.model.c_in) != 2:
-        raise ValueError("model.c_in must be 2 for [MRI, ribbon_prob]")
-    if not 1 <= int(cfg.model.geom_depth) <= 6:
-        raise ValueError(f"model.geom_depth must be in [1, 6], got {cfg.model.geom_depth}")
+    use_probability_map = bool(
+        OmegaConf.select(
+            cfg,
+            "dataset.use_probability_map",
+            default=True,
+        )
+    )
+    if use_probability_map:
+        raise ValueError(
+            "MRI-only training requires "
+            "dataset.use_probability_map=false."
+        )
+
+    if int(cfg.model.c_in) != 1:
+        raise ValueError(
+            "MRI-only training requires model.c_in=1, "
+            f"but got {cfg.model.c_in}."
+        )
+
+    use_fixed_initial_surface = bool(
+        OmegaConf.select(
+            cfg,
+            "dataset.use_fixed_initial_surface",
+            default=False,
+        )
+    )
+    fixed_template_root = OmegaConf.select(
+        cfg,
+        "dataset.fixed_template_root",
+        default=None,
+    )
+    if (
+        use_fixed_initial_surface
+        and fixed_template_root in (None, "")
+    ):
+        raise ValueError(
+            "dataset.use_fixed_initial_surface=true requires "
+            "dataset.fixed_template_root."
+        )
     if int(cfg.model.n_steps) < 0:
         raise ValueError(f"model.n_steps must be >= 0, got {cfg.model.n_steps}")
     _require_finite("model.sigma", cfg.model.sigma, minimum=1e-12)
-    _require_finite("model.geom_ratio", cfg.model.geom_ratio, minimum=1e-12)
     _require_finite("model.dropout", cfg.model.dropout, minimum=0.0, maximum=0.999999)
 
     positive_ints = {
@@ -309,8 +343,6 @@ def validate_deform_training_config(cfg: DictConfig) -> None:
         raise ValueError("trainer.scheduler_cooldown must be >= 0")
     if int(getattr(cfg.model, "gn_groups", 8)) <= 0:
         raise ValueError("model.gn_groups must be > 0")
-    _require_finite("model.gate_init", getattr(cfg.model, "gate_init", -3.0))
-
     _require_finite("trainer.learning_rate", cfg.trainer.learning_rate, minimum=1e-12)
     _require_finite("trainer.weight_decay", cfg.trainer.weight_decay, minimum=0.0)
     _require_finite("trainer.grad_clip_norm", cfg.trainer.grad_clip_norm, minimum=0.0)
@@ -444,8 +476,11 @@ def _preflight_dataset(dataset, *, label: str, expected_surfaces: List[str]) -> 
         sample = dataset[index]
         subject = sample.get("subject", f"index-{index}")
         vol = sample.get("vol")
-        if not torch.is_tensor(vol) or vol.ndim != 4 or int(vol.shape[0]) != 2:
-            raise ValueError(f"{label} {subject}: expected vol shape (2,D,H,W), got {getattr(vol, 'shape', None)}")
+        if not torch.is_tensor(vol) or vol.ndim != 4 or int(vol.shape[0]) != 1:
+            raise ValueError(
+                f"{label} {subject}: expected MRI-only vol shape "
+                f"(1,D,H,W), got {getattr(vol, 'shape', None)}"
+            )
         if not torch.isfinite(vol).all():
             raise ValueError(f"{label} {subject}: volume contains non-finite values")
         for field in ("init_verts_vox", "init_faces", "gt_verts_vox", "gt_faces"):
@@ -540,59 +575,163 @@ def _validate_multi_split_df(df: pd.DataFrame) -> None:
         raise ValueError(f"Multi-dataset split_file must contain columns {sorted(req)}. Got: {list(df.columns)}")
 
 
+def _requires_subject_initsurf(cfg) -> bool:
+    """
+    Return whether the selected input mode needs subject-specific
+    initialization-surface resources.
+
+    Subject-specific resources are required when either:
+      1. the ribbon probability map is used, or
+      2. initial surfaces are subject-specific.
+
+    MRI-only fixed-template training needs neither.
+    """
+    use_probability_map = bool(
+        OmegaConf.select(
+            cfg,
+            "dataset.use_probability_map",
+            default=True,
+        )
+    )
+    use_fixed_initial_surface = bool(
+        OmegaConf.select(
+            cfg,
+            "dataset.use_fixed_initial_surface",
+            default=False,
+        )
+    )
+
+    return (
+        use_probability_map
+        or not use_fixed_initial_surface
+    )
+
+
 def _detect_deform_train_mode(cfg):
-    single_preproc_root = OmegaConf.select(cfg, "dataset.path", default=None)
-    single_initsurf_root = OmegaConf.select(cfg, "dataset.initsurf_root", default=None)
+    single_preproc_root = OmegaConf.select(
+        cfg,
+        "dataset.path",
+        default=None,
+    )
+    single_initsurf_root = OmegaConf.select(
+        cfg,
+        "dataset.initsurf_root",
+        default=None,
+    )
 
-    single_preproc_root = None if single_preproc_root in (None, "") else str(single_preproc_root)
-    single_initsurf_root = None if single_initsurf_root in (None, "") else str(single_initsurf_root)
+    single_preproc_root = (
+        None
+        if single_preproc_root in (None, "")
+        else str(single_preproc_root)
+    )
+    single_initsurf_root = (
+        None
+        if single_initsurf_root in (None, "")
+        else str(single_initsurf_root)
+    )
 
-    roots_map = _get_map(cfg.dataset, ("roots",))
-    initsurf_roots_map = _get_map(cfg.dataset, ("initsurf_roots",))
+    roots_map = _get_map(
+        cfg.dataset,
+        ("roots",),
+    )
+    initsurf_roots_map = _get_map(
+        cfg.dataset,
+        ("initsurf_roots",),
+    )
+
+    needs_subject_initsurf = _requires_subject_initsurf(cfg)
 
     if single_preproc_root is not None:
         log.info("Deform training mode: SINGLE-DATASET")
-        log.info(f"dataset.path = {single_preproc_root}")
-        log.info(f"dataset.initsurf_root = {single_initsurf_root}")
+        log.info("dataset.path = %s", single_preproc_root)
+        log.info(
+            "subject-specific initsurf required = %s",
+            needs_subject_initsurf,
+        )
 
-        if single_initsurf_root is None:
-            raise ValueError("Single-dataset deform train requires dataset.initsurf_root")
+        if needs_subject_initsurf and single_initsurf_root is None:
+            raise ValueError(
+                "Single-dataset training requires "
+                "dataset.initsurf_root for the selected input mode."
+            )
 
         if roots_map is not None:
             log.warning(
                 "Both dataset.path and dataset.roots are present. "
                 "Using SINGLE-DATASET mode and ignoring dataset.roots."
             )
+
         if initsurf_roots_map is not None:
             log.warning(
-                "Both dataset.initsurf_root and dataset.initsurf_roots are present. "
-                "Using SINGLE-DATASET mode and ignoring dataset.initsurf_roots."
+                "Both dataset.initsurf_root and "
+                "dataset.initsurf_roots are present. "
+                "Using SINGLE-DATASET mode and ignoring "
+                "dataset.initsurf_roots."
             )
 
-        return "single", single_preproc_root, single_initsurf_root, None, None
+        return (
+            "single",
+            single_preproc_root,
+            single_initsurf_root,
+            None,
+            None,
+        )
 
     if roots_map is not None:
         log.info("Deform training mode: MULTI-DATASET")
-        log.info(f"dataset.roots keys = {list(roots_map.keys())}")
+        log.info(
+            "dataset.roots keys = %s",
+            list(roots_map.keys()),
+        )
+        log.info(
+            "subject-specific initsurf required = %s",
+            needs_subject_initsurf,
+        )
 
-        if initsurf_roots_map is None:
-            raise ValueError("Multi-dataset deform train requires dataset.initsurf_roots")
+        if needs_subject_initsurf and initsurf_roots_map is None:
+            raise ValueError(
+                "Multi-dataset training requires "
+                "dataset.initsurf_roots for the selected input mode."
+            )
 
-        missing = sorted(set(roots_map.keys()) - set(initsurf_roots_map.keys()))
-        if missing:
-            raise KeyError(f"dataset.initsurf_roots missing keys required by dataset.roots: {missing}")
+        if initsurf_roots_map is not None:
+            missing = sorted(
+                set(roots_map.keys())
+                - set(initsurf_roots_map.keys())
+            )
 
-        extra = sorted(set(initsurf_roots_map.keys()) - set(roots_map.keys()))
-        if extra:
-            log.warning(f"dataset.initsurf_roots has extra keys not present in dataset.roots: {extra}")
+            if needs_subject_initsurf and missing:
+                raise KeyError(
+                    "dataset.initsurf_roots is missing keys "
+                    f"required by dataset.roots: {missing}"
+                )
 
-        return "multi", None, None, roots_map, initsurf_roots_map
+            extra = sorted(
+                set(initsurf_roots_map.keys())
+                - set(roots_map.keys())
+            )
+
+            if extra:
+                log.warning(
+                    "dataset.initsurf_roots has extra keys "
+                    "not present in dataset.roots: %s",
+                    extra,
+                )
+
+        return (
+            "multi",
+            None,
+            None,
+            roots_map,
+            initsurf_roots_map,
+        )
 
     raise ValueError(
         "Could not determine deform training mode. Provide either:\n"
-        "  - dataset.path + dataset.initsurf_root   (single-dataset)\n"
-        "or\n"
-        "  - dataset.roots + dataset.initsurf_roots (multi-dataset)"
+        "  - dataset.path for single-dataset mode, or\n"
+        "  - dataset.roots for multi-dataset mode.\n"
+        "An initsurf root is required only when the selected "
+        "input mode uses subject-specific initialization resources."
     )
 
 
@@ -1151,19 +1290,57 @@ def main(cfg: DictConfig):
         session_label = str(getattr(cfg.dataset, "session_label", "01")).strip()
         space = str(getattr(cfg.dataset, "space", "MNI152")).strip()
 
+        use_probability_map = bool(
+            OmegaConf.select(
+                cfg,
+                "dataset.use_probability_map",
+                default=True,
+            )
+        )
+        use_fixed_initial_surface = bool(
+            OmegaConf.select(
+                cfg,
+                "dataset.use_fixed_initial_surface",
+                default=False,
+            )
+        )
+        fixed_template_root = _optional_abs_path(
+            OmegaConf.select(
+                cfg,
+                "dataset.fixed_template_root",
+                default=None,
+            )
+        )
+        needs_subject_initsurf = _requires_subject_initsurf(cfg)
+
         mode, single_preproc_root, single_initsurf_root, roots_map, initsurf_roots_map = _detect_deform_train_mode(cfg)
         if mode == "single":
-            single_preproc_root = _as_abs_path(single_preproc_root, field="dataset.path")
-            single_initsurf_root = _as_abs_path(single_initsurf_root, field="dataset.initsurf_root")
+            single_preproc_root = _as_abs_path(
+                single_preproc_root,
+                field="dataset.path",
+            )
+            if single_initsurf_root is not None:
+                single_initsurf_root = _as_abs_path(
+                    single_initsurf_root,
+                    field="dataset.initsurf_root",
+                )
         else:
             roots_map = {
-                key: _as_abs_path(value, field=f"dataset.roots.{key}")
+                key: _as_abs_path(
+                    value,
+                    field=f"dataset.roots.{key}",
+                )
                 for key, value in roots_map.items()
             }
-            initsurf_roots_map = {
-                key: _as_abs_path(value, field=f"dataset.initsurf_roots.{key}")
-                for key, value in initsurf_roots_map.items()
-            }
+
+            if initsurf_roots_map is not None:
+                initsurf_roots_map = {
+                    key: _as_abs_path(
+                        value,
+                        field=f"dataset.initsurf_roots.{key}",
+                    )
+                    for key, value in initsurf_roots_map.items()
+                }
 
         out_root = _as_abs_path(
             getattr(cfg.outputs, "root", getattr(cfg.outputs, "output_dir", "")),
@@ -1192,11 +1369,26 @@ def main(cfg: DictConfig):
             val_sets = []
 
             for ds_key, ds_df in df.groupby("dataset"):
-                if ds_key not in roots_map or ds_key not in initsurf_roots_map:
-                    raise KeyError(f"Missing dataset key in config: {ds_key}")
+                if ds_key not in roots_map:
+                    raise KeyError(
+                        f"dataset.roots is missing key: {ds_key}"
+                    )
 
                 preproc_root = str(roots_map[ds_key])
-                initsurf_root = str(initsurf_roots_map[ds_key])
+
+                if initsurf_roots_map is None:
+                    initsurf_root = None
+                else:
+                    initsurf_root = initsurf_roots_map.get(
+                        ds_key,
+                        None,
+                    )
+
+                if needs_subject_initsurf and initsurf_root is None:
+                    raise KeyError(
+                        "dataset.initsurf_roots is missing key "
+                        f"required by the selected input mode: {ds_key}"
+                    )
 
                 tr_subs = ds_df[ds_df["split"].astype(str).str.strip() == train_split]["subject"].astype(str).tolist()
                 va_subs = ds_df[ds_df["split"].astype(str).str.strip() == val_split]["subject"].astype(str).tolist()
@@ -1215,6 +1407,9 @@ def main(cfg: DictConfig):
                             prob_clip_max=cfg.dataset.prob_clip_max,
                             prob_gamma=cfg.dataset.prob_gamma,
                             strict_missing=bool(getattr(cfg.dataset, "strict_missing", True)),
+                            use_probability_map=use_probability_map,
+                            use_fixed_initial_surface=use_fixed_initial_surface,
+                            fixed_template_root=fixed_template_root or None,
                         )
                     )
 
@@ -1232,6 +1427,9 @@ def main(cfg: DictConfig):
                             prob_clip_max=cfg.dataset.prob_clip_max,
                             prob_gamma=cfg.dataset.prob_gamma,
                             strict_missing=bool(getattr(cfg.dataset, "strict_missing", True)),
+                            use_probability_map=use_probability_map,
+                            use_fixed_initial_surface=use_fixed_initial_surface,
+                            fixed_template_root=fixed_template_root or None,
                         )
                     )
 
@@ -1255,7 +1453,7 @@ def main(cfg: DictConfig):
 
             train_ds = CSRDeformDataset(
                 preproc_root=str(single_preproc_root),
-                initsurf_root=str(single_initsurf_root),
+                initsurf_root=single_initsurf_root,
                 subjects=tr_subs,
                 session_label=session_label,
                 space=space,
@@ -1265,11 +1463,14 @@ def main(cfg: DictConfig):
                 prob_clip_max=cfg.dataset.prob_clip_max,
                 prob_gamma=cfg.dataset.prob_gamma,
                 strict_missing=bool(getattr(cfg.dataset, "strict_missing", True)),
+                use_probability_map=use_probability_map,
+                use_fixed_initial_surface=use_fixed_initial_surface,
+                fixed_template_root=fixed_template_root or None,
             )
 
             val_ds = CSRDeformDataset(
                 preproc_root=str(single_preproc_root),
-                initsurf_root=str(single_initsurf_root),
+                initsurf_root=single_initsurf_root,
                 subjects=va_subs,
                 session_label=session_label,
                 space=space,
@@ -1279,6 +1480,9 @@ def main(cfg: DictConfig):
                 prob_clip_max=cfg.dataset.prob_clip_max,
                 prob_gamma=cfg.dataset.prob_gamma,
                 strict_missing=bool(getattr(cfg.dataset, "strict_missing", True)),
+                use_probability_map=use_probability_map,
+                use_fixed_initial_surface=use_fixed_initial_surface,
+                fixed_template_root=fixed_template_root or None,
             )
 
         _rank0_preflight_or_raise(
@@ -1330,12 +1534,16 @@ def main(cfg: DictConfig):
             log.info("Loaded %d validation subjects", len(val_ds))
 
         # model
-        # This deformation trainer uses exactly two volumetric channels: MRI + ribbon probability.
-        # The optional prob-gradient channel is intentionally not supported in this final trainer.
-        if int(cfg.model.c_in) != 2:
+        if use_probability_map:
             raise ValueError(
-                f"model.c_in={cfg.model.c_in}, but this trainer expects exactly 2 input channels "
-                "[MRI, ribbon_prob]. Set model.c_in=2."
+                "MRI-only training requires "
+                "dataset.use_probability_map=false."
+            )
+
+        if int(cfg.model.c_in) != 1:
+            raise ValueError(
+                "MRI-only training requires model.c_in=1, "
+                f"but got {cfg.model.c_in}."
             )
 
         model = SurfDeform(
@@ -1343,10 +1551,7 @@ def main(cfg: DictConfig):
             C_in=int(cfg.model.c_in),
             inshape=inshape,
             sigma=float(cfg.model.sigma),
-            geom_ratio=float(getattr(cfg.model, "geom_ratio", 0.5)),
-            geom_depth=int(getattr(cfg.model, "geom_depth", 6)),
             gn_groups=int(getattr(cfg.model, "gn_groups", 8)),
-            gate_init=float(getattr(cfg.model, "gate_init", -3.0)),
             dropout=float(getattr(cfg.model, "dropout", 0.0)),
         ).to(device)
 
