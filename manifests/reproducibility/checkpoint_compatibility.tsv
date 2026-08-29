@@ -1,0 +1,6 @@
+arm	exists	bytes_ok	sha256_ok	checkpoint_type	checkpoint_keys	model_keys	missing	unexpected	shape_mismatch	same_namespace_as_sphere	first_conv_shape	strict_load_ok	production_loader_ok
+Sphere	True	True	True	OrderedDict	108	108	0	0	0	True	(8, 1, 3, 3, 3)	True	True
+Random	True	True	True	OrderedDict	108	108	0	0	0	True	(8, 1, 3, 3, 3)	True	True
+Original150k	True	True	True	OrderedDict	108	108	0	0	0	True	(8, 1, 3, 3, 3)	True	True
+Curv0	True	True	True	OrderedDict	108	108	0	0	0	True	(8, 1, 3, 3, 3)	True	True
+Curv1	True	True	True	OrderedDict	108	108	0	0	0	True	(8, 1, 3, 3, 3)	True	True
