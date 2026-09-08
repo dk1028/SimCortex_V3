@@ -3,18 +3,16 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "simcortex"
-version = "2.0.0"
-description = "SimCortex is a modular framework for cortical surface reconstruction."
+name = "simcortex-fixedinit"
+version = "0.1.0"
+description = "Fixed-initialization MRI-only cortical surface deformation experiments derived from SimCortex."
 readme = "README.md"
 requires-python = ">=3.10"
-
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 
 authors = [
-  { name = "Kaveh Moradkhani" },
-  { name = "Sylvain Bouix" }
+  { name = "Dowoo Kim" }
 ]
 
 classifiers = [
@@ -36,18 +34,16 @@ dependencies = [
 ]
 
 [project.urls]
-"Source Code" = "https://github.com/Neuro-iX/SimCortex"
-"Lab Page" = "https://github.com/Neuro-iX"
+"Source Code" = "https://github.com/dk1028/SimCortex_V3"
+"Upstream SimCortex" = "https://github.com/Neuro-iX/SimCortex"
 
 [project.optional-dependencies]
-preproc = ["antspyx>=0.6.1"]
-seg = ["monai>=1.3"]
-initsurf = ["python-fcl"]
-deform-metrics = ["python-fcl", "pymeshlab"]
 torch = ["torch>=2.0"]
+deform-metrics = ["python-fcl", "pymeshlab"]
+dev = ["pytest>=8"]
 
 [project.scripts]
-simcortex = "simcortex.cli.main:app"
+simcortex-fixedinit = "simcortex.cli.main:app"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -59,5 +55,4 @@ where = ["src"]
 [tool.setuptools.package-data]
 simcortex = [
   "configs/**/*.yaml",
-  "utils/critical186LUT.raw.gz",
 ]
